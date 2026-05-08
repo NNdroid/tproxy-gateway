@@ -1,0 +1,51 @@
+# ==========================================
+# TProxy Gateway 核心配置文件
+# ==========================================
+
+# 1. 全局日志配置
+log:
+  # 可选值: debug, info, warn, error
+  # 日常运行建议设为 info，排查网络问题时设为 debug
+  level: "info"
+
+# 2. 本机监听服务配置
+server:
+  # 劫持 DNS 流量的监听地址 (FakeIP 服务)
+  dns_addr: ":5353"
+  # 透明代理 TCP/UDP 流量的监听地址
+  tproxy_addr: "[::]:10800"
+
+# 3. 全局路由策略 (兜底策略)
+routing:
+  # 当域名未匹配到下方任何 rules 时，默认采取的动作
+  # "REJECT" (拒绝连接，防泄漏首选) / "DIRECT" (直连) / "127.0.0.1:1080" (默认走代理)
+  default_upstream: "REJECT"
+  # 直连时使用的安全 DNS (防污染)
+  # 支持协议: doh://, dot://, tcp://, udp:// (缺省视为 udp)
+  default_dns: "doh://223.5.5.5/dns-query?sni=dns.alidns.com"
+
+# 4. FakeIP 资源池配置
+fake_ip:
+  # IPv6 分配网段，支持任意 CIDR 掩码 (如 /8, /112 等)
+  cidr: "fd00::/8"
+  # 记录存活时间 (无流量经过后多久自动清理)
+  ttl: "2h"
+  # 异步持久化文件，重启防止连接断开
+  persist_file: "fakeip.json"
+
+# 5. 分流规则 (基于 Trie 树的高性能后缀匹配)
+rules:
+  # 规则 A: 走 SOCKS5 代理节点
+  - proxy: "127.0.0.1:1080"
+    domains:
+      - "google.com"
+      - "youtube.com"
+      - "github.com"
+      - "x.com"
+
+  # 规则 B: 强制直连 (DIRECT 关键字)
+  - proxy: "DIRECT"
+    domains:
+      - "baidu.com"
+      - "bilibili.com"
+      - "apple.com"
