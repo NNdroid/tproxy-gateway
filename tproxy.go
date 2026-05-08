@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -31,13 +32,13 @@ func startTCPTProxy(ctx context.Context, addr string) {
 	lc := net.ListenConfig{Control: setTransparentSocket}
 	listener, err := lc.Listen(context.Background(), "tcp6", addr)
 	if err != nil {
-		zap.S().Fatalf("TCP TProxy 失败: %v", err)
+		zap.S().Fatalf("TCP TProxy 失敗: %v", err)
 	}
-	zap.S().Infof("TCP TProxy 启动于 %s", addr)
+	zap.S().Infof("TCP TProxy 啟動於 %s", addr)
 
 	go func() {
 		<-ctx.Done()
-		zap.S().Infof("[TCP] 正在关闭 TProxy 监听器...")
+		zap.S().Infof("[TCP] 正在關閉 TProxy 監聽器...")
 		listener.Close()
 	}()
 
@@ -61,18 +62,22 @@ func handleTCP(clientConn net.Conn) {
 		return
 	}
 
-	targetEndpoint := fmt.Sprintf("%s:%d", domain, targetAddr.Port)
+	targetEndpoint := fmt.Sprintf("%s:%d", strings.TrimSuffix(domain, "."), targetAddr.Port)
 
-	upstreamProxy, matched := router.Match(domain)
-	if !matched {
-		upstreamProxy = cfg.Routing.DefaultUpstream
+	node := router.MatchNode(domain)
+	upstreamProxy := cfg.Routing.DefaultUpstream
+	var rewrites map[string]string
+
+	if node != nil && node.Upstream != "" {
+		upstreamProxy = node.Upstream
+		rewrites = node.HeaderRewrite
 	}
 
 	isDirect := upstreamProxy == "" || strings.ToUpper(upstreamProxy) == "DIRECT"
 	isReject := strings.ToUpper(upstreamProxy) == "REJECT"
 
 	if isReject {
-		zap.S().Debugf("[TCP] 拦截请求: %s (命中 REJECT)", domain)
+		zap.S().Debugf("[TCP] 攔截請求: %s (命中 REJECT)", domain)
 		return
 	}
 
@@ -80,14 +85,32 @@ func handleTCP(clientConn net.Conn) {
 	var err error
 
 	if !isDirect {
-		zap.S().Debugf("[TCP] 匹配代理: %s -> %s", domain, upstreamProxy)
-		dialer, _ := proxy.SOCKS5("tcp", upstreamProxy, nil, proxy.Direct)
+		user, pass, addr := parseSocksAddr(upstreamProxy)
+		var auth *proxy.Auth
+		if user != "" {
+			auth = &proxy.Auth{User: user, Password: pass}
+		}
+
+		zap.S().Debugf("[TCP] 匹配代理: %s -> %s", domain, addr)
+		dialer, err := proxy.SOCKS5("tcp", addr, auth, proxy.Direct)
+		if err != nil {
+			zap.S().Errorf("[TCP] 創建 SOCKS5 撥號器失敗: %v", err)
+			return
+		}
 		targetConn, err = dialer.Dial("tcp", targetEndpoint)
+
+		if err != nil && strings.Contains(err.Error(), "address type not supported") {
+			zap.S().Warnf("[TCP] 上遊不支持域名解析，嘗試本地解析後發送 IP: %s", domain)
+			ips, _ := defaultResolver.LookupIP(domain)
+			if len(ips) > 0 {
+				targetConn, err = dialer.Dial("tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port))
+			}
+		}
 	} else {
-		zap.S().Debugf("[TCP] 匹配直连: %s", domain)
+		zap.S().Debugf("[TCP] 匹配直連: %s", domain)
 		ips, resolveErr := defaultResolver.LookupIP(domain)
 		if resolveErr != nil || len(ips) == 0 {
-			zap.S().Warnf("[TCP] 直连解析 %s 失败: %v", domain, resolveErr)
+			zap.S().Warnf("[TCP] 直連解析 %s 失敗: %v", domain, resolveErr)
 			return
 		}
 
@@ -95,28 +118,37 @@ func handleTCP(clientConn net.Conn) {
 			addr := fmt.Sprintf("%s:%d", ip.String(), targetAddr.Port)
 			targetConn, err = net.DialTimeout("tcp", addr, 3*time.Second)
 			if err == nil {
-				zap.S().Debugf("[TCP] 直连拨号成功: %s -> %s", domain, addr)
+				zap.S().Debugf("[TCP] 直連撥號成功: %s -> %s", domain, addr)
 				break
 			}
 		}
 
 		if targetConn == nil {
-			zap.S().Warnf("[TCP] 直连 %s 所有 IP 均失败", domain)
+			zap.S().Warnf("[TCP] 直連 %s 所有 IP 均失敗", domain)
 			return
 		}
 	}
 
-	if err != nil {
-		zap.S().Errorf("[TCP] 连接失败 %s: %v", domain, err)
+	if err != nil || targetConn == nil {
+		zap.S().Errorf("[TCP] 無法連接到上游 %s: %v", domain, err)
 		return
 	}
 	defer targetConn.Close()
 
+	if targetAddr.Port == 80 && len(rewrites) > 0 {
+		reader := bufio.NewReader(clientConn)
+		newHeader, err := rewriteHTTPHeader(reader, rewrites)
+		if err == nil {
+			targetConn.Write(newHeader)
+			go io.Copy(targetConn, reader)
+			io.Copy(clientConn, targetConn)
+			return
+		}
+	}
+
 	go io.Copy(targetConn, clientConn)
 	io.Copy(clientConn, targetConn)
 }
-
-// ========== UDP 部分 ==========
 
 type UDPSession struct {
 	UpstreamConn net.Conn
@@ -132,14 +164,14 @@ func startUDPTProxy(ctx context.Context, addr string) {
 	lc := net.ListenConfig{Control: setTransparentSocket}
 	packetConn, err := lc.ListenPacket(context.Background(), "udp6", addr)
 	if err != nil {
-		zap.S().Fatalf("UDP TProxy 失败: %v", err)
+		zap.S().Fatalf("UDP TProxy 失敗: %v", err)
 	}
-	zap.S().Infof("UDP TProxy 启动于 %s", addr)
+	zap.S().Infof("UDP TProxy 啟動於 %s", addr)
 	udpConn := packetConn.(*net.UDPConn)
 
 	go func() {
 		<-ctx.Done()
-		zap.S().Infof("[UDP] 正在关闭 TProxy 监听器...")
+		zap.S().Infof("[UDP] 正在關閉 TProxy 監聽器...")
 		udpConn.Close()
 	}()
 
@@ -194,16 +226,17 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 			return
 		}
 
-		upstreamProxy, matched := router.Match(domain)
-		if !matched {
-			upstreamProxy = cfg.Routing.DefaultUpstream
+		node := router.MatchNode(domain)
+		upstreamProxy := cfg.Routing.DefaultUpstream
+		if node != nil && node.Upstream != "" {
+			upstreamProxy = node.Upstream
 		}
 
 		isDirect := upstreamProxy == "" || strings.ToUpper(upstreamProxy) == "DIRECT"
 		isReject := strings.ToUpper(upstreamProxy) == "REJECT"
 
 		if isReject {
-			zap.S().Debugf("[UDP] 拦截请求: %s (命中 REJECT)", domain)
+			zap.S().Debugf("[UDP] 攔截請求: %s (命中 REJECT)", domain)
 			return
 		}
 
@@ -211,29 +244,30 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 		var err error
 
 		if !isDirect {
-			zap.S().Debugf("[UDP] 匹配代理: %s -> %s", domain, upstreamProxy)
-			client, err := socks5.NewClient(upstreamProxy, "", "", 10, 10)
+			user, pass, addr := parseSocksAddr(upstreamProxy)
+			zap.S().Debugf("[UDP] 匹配代理: %s -> %s", domain, addr)
+			client, err := socks5.NewClient(addr, user, pass, 10, 10)
 			if err != nil {
-				zap.S().Errorf("[UDP] SOCKS5 客户端创建失败: %v", err)
+				zap.S().Errorf("[UDP] SOCKS5 客戶端創建失敗: %v", err)
 				return
 			}
-			upstreamConn, err = client.Dial("udp", fmt.Sprintf("%s:%d", domain, fakeIP.Port))
+			upstreamConn, err = client.Dial("udp", fmt.Sprintf("%s:%d", strings.TrimSuffix(domain, "."), fakeIP.Port))
 			if err != nil {
-				zap.S().Errorf("[UDP] SOCKS5 拨号失败: %v", err)
+				zap.S().Errorf("[UDP] SOCKS5 撥號失敗: %v", err)
 				return
 			}
 		} else {
-			zap.S().Debugf("[UDP] 匹配直连: %s", domain)
+			zap.S().Debugf("[UDP] 匹配直連: %s", domain)
 			ips, resolveErr := defaultResolver.LookupIP(domain)
 			if resolveErr != nil || len(ips) == 0 {
-				zap.S().Warnf("[UDP] 直连解析 %s 失败: %v", domain, resolveErr)
+				zap.S().Warnf("[UDP] 直連解析 %s 失敗: %v", domain, resolveErr)
 				return
 			}
 
 			realTarget := fmt.Sprintf("%s:%d", ips[0].String(), fakeIP.Port)
 			upstreamConn, err = net.DialTimeout("udp", realTarget, 5*time.Second)
 			if err != nil {
-				zap.S().Warnf("[UDP] 直连拨号 %s 失败: %v", realTarget, err)
+				zap.S().Warnf("[UDP] 直連撥號 %s 失敗: %v", realTarget, err)
 				return
 			}
 		}
@@ -249,7 +283,7 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 	sess.LastActive = time.Now()
 	_, err := sess.UpstreamConn.Write(payload)
 	if err != nil {
-		zap.S().Debugf("[UDP] 写入上游失败: %v", err)
+		zap.S().Debugf("[UDP] 寫入上遊失敗: %v", err)
 		sessionMu.Lock()
 		delete(udpSessions, sessionKey)
 		sessionMu.Unlock()
@@ -301,7 +335,7 @@ func startUDPSweeper(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			zap.S().Infof("[UDP] 停止会话垃圾回收器")
+			zap.S().Infof("[UDP] 停止會話垃圾回收器")
 			return
 		case <-ticker.C:
 			now := time.Now()

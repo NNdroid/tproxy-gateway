@@ -20,32 +20,30 @@ var (
 )
 
 func main() {
-	configPath := flag.String("c", "config.yaml", "指定 YAML 配置文件的路径")
+	configPath := flag.String("c", "config.yaml", "指定 YAML 配置文件的路徑")
 	flag.Parse()
 
-	// 临时初始化简易 Logger
 	InitLogger("info")
 
 	var err error
 	cfg, err = LoadConfig(*configPath)
 	if err != nil {
-		zap.S().Fatalf("配置加载中止: %v", err)
+		zap.S().Fatalf("配置加載中止: %v", err)
 	}
 
-	// 按配置重新初始化全局 Logger
 	InitLogger(cfg.Log.Level)
-	zap.S().Infof("正在从 %s 加载配置...", *configPath)
+	zap.S().Infof("正在從 %s 加載配置...", *configPath)
 
 	defaultResolver, err = NewDefaultResolver(cfg.Routing.DefaultDNS)
 	if err != nil {
-		zap.S().Fatalf("初始化默认 DNS 失败: %v", err)
+		zap.S().Fatalf("初始化默認 DNS 失敗: %v", err)
 	}
-	zap.S().Infof("默认 DNS 已加载: [%s] -> %s", defaultResolver.Scheme, defaultResolver.HostPort)
+	zap.S().Infof("默認 DNS 已加載: [%s] -> %s", defaultResolver.Scheme, defaultResolver.HostPort)
 
 	ttl, _ := time.ParseDuration(cfg.FakeIP.TTL)
 	startIP, ipnet, err := cfg.FakeIP.ParseCIDR()
 	if err != nil {
-		zap.S().Fatalf("CIDR 错误: %v", err)
+		zap.S().Fatalf("CIDR 錯誤: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -55,12 +53,9 @@ func main() {
 	router = NewDomainRouter()
 
 	for _, rCfg := range cfg.Rules {
-		upstream := rCfg.Proxy
-		if strings.ToUpper(upstream) == "DIRECT" {
-			upstream = ""
-		}
+		router.AddRule("", rCfg.Proxy, rCfg.HeaderRewrite)
 		for _, domain := range rCfg.Domains {
-			router.AddRule(domain, upstream)
+			router.AddRule(domain, rCfg.Proxy, rCfg.HeaderRewrite)
 		}
 	}
 
@@ -69,17 +64,17 @@ func main() {
 	go startUDPTProxy(ctx, cfg.Server.TProxyAddr)
 	go startUDPSweeper(ctx)
 
-	zap.S().Infof("🚀 TProxy 网关启动完成 (日志级别: %s)", strings.ToUpper(cfg.Log.Level))
+	zap.S().Infof("🚀 TProxy 網關啟動完成 (日誌級別: %s)", strings.ToUpper(cfg.Log.Level))
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	zap.S().Infof("接收到退出信号，触发全局 Cancel...")
+	zap.S().Infof("接收到退出信號，觸發全局 Cancel...")
 	cancel()
 	time.Sleep(1 * time.Second)
 
-	zap.S().Infof("正在保存缓存并安全关闭...")
+	zap.S().Infof("正在保存緩存並安全關閉...")
 	pool.Close()
 	zap.S().Sync()
 }

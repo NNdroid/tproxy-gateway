@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,19 +38,20 @@ type FakeIPConfig struct {
 }
 
 type RuleConfig struct {
-	Proxy   string   `yaml:"proxy"`
-	Domains []string `yaml:"domains"`
+	Proxy         string            `yaml:"proxy"`
+	Domains       []string          `yaml:"domains"`
+	HeaderRewrite map[string]string `yaml:"header_rewrite"`
 }
 
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败: %v", err)
+		return nil, fmt.Errorf("讀取配置文件失敗: %v", err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析 YAML 失败: %v", err)
+		return nil, fmt.Errorf("解析 YAML 失敗: %v", err)
 	}
 
 	if cfg.Log.Level == "" {
@@ -77,7 +79,25 @@ func (c *FakeIPConfig) ParseCIDR() (net.IP, *net.IPNet, error) {
 		return nil, nil, err
 	}
 	if ip.To16() == nil {
-		return nil, nil, fmt.Errorf("FakeIP 必须使用 IPv6 CIDR: %s", c.CIDR)
+		return nil, nil, fmt.Errorf("FakeIP 必須使用 IPv6 CIDR: %s", c.CIDR)
 	}
 	return ip.To16(), ipnet, nil
+}
+
+func parseSocksAddr(rawAddr string) (user, pass, addr string) {
+	if !strings.Contains(rawAddr, "@") {
+		return "", "", rawAddr
+	}
+	parts := strings.SplitN(rawAddr, "@", 2)
+	userInfo := parts[0]
+	addr = parts[1]
+
+	if strings.Contains(userInfo, ":") {
+		up := strings.SplitN(userInfo, ":", 2)
+		user = up[0]
+		pass = up[1]
+	} else {
+		user = userInfo
+	}
+	return
 }

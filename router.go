@@ -3,8 +3,9 @@ package main
 import "strings"
 
 type TrieNode struct {
-	children map[string]*TrieNode
-	Upstream string
+	children      map[string]*TrieNode
+	Upstream      string
+	HeaderRewrite map[string]string
 }
 
 type DomainRouter struct {
@@ -17,7 +18,7 @@ func NewDomainRouter() *DomainRouter {
 	}
 }
 
-func (r *DomainRouter) AddRule(domain string, upstream string) {
+func (r *DomainRouter) AddRule(domain string, upstream string, rewrite map[string]string) {
 	domain = strings.TrimSpace(domain)
 	domain = strings.TrimSuffix(domain, ".")
 	if domain == "" {
@@ -38,37 +39,28 @@ func (r *DomainRouter) AddRule(domain string, upstream string) {
 		node = node.children[part]
 	}
 	node.Upstream = upstream
+	node.HeaderRewrite = rewrite
 }
 
-func (r *DomainRouter) Match(domain string) (string, bool) {
-	if domain == "" {
-		return "", false
-	}
-	if domain[len(domain)-1] == '.' {
-		domain = domain[:len(domain)-1]
-	}
-
+func (r *DomainRouter) MatchNode(domain string) *TrieNode {
+	domain = strings.TrimSuffix(domain, ".")
 	node := r.root
-	right := len(domain)
+	parts := strings.Split(domain, ".")
 
-	for i := len(domain) - 1; i >= -1; i-- {
-		if i == -1 || domain[i] == '.' {
-			part := domain[i+1 : right]
-			right = i
+	var lastMatchedNode *TrieNode
+	if node.Upstream != "" {
+		lastMatchedNode = node
+	}
 
-			child, ok := node.children[part]
-			if !ok {
-				if node.Upstream != "" {
-					return node.Upstream, true
-				}
-				return "", false
-			}
-			node = child
+	for i := len(parts) - 1; i >= 0; i-- {
+		child, ok := node.children[parts[i]]
+		if !ok {
+			break
+		}
+		node = child
+		if node.Upstream != "" {
+			lastMatchedNode = node
 		}
 	}
-
-	if node != nil && node.Upstream != "" {
-		return node.Upstream, true
-	}
-	return "", false
+	return lastMatchedNode
 }

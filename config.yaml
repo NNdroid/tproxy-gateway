@@ -49,3 +49,11 @@ rules:
       - "baidu.com"
       - "bilibili.com"
       - "apple.com"
+
+  - proxy: "127.0.0.1:4447"
+    domains:
+      - "zzz.i2p"
+    # header 重写
+    header_rewrite:
+      "Host": "zzz.i2p"
+      "Connection": "close"
