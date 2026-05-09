@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -103,7 +103,7 @@ func (p *FakeIPPool) GetFakeIP(domain string) net.IP {
 	p.host2rec[domain] = rec
 	p.ip2rec[newIPStr] = rec
 	p.isDirty = true
-	
+
 	zap.S().Debugf("[FakeIP] 分配新 IP: %s -> %s", domain, newIPStr)
 	return newIP
 }

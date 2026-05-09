@@ -13,9 +13,34 @@ import (
 
 	"github.com/txthinking/socks5"
 	"go.uber.org/zap"
-	"golang.org/x/net/proxy"
 	"golang.org/x/sys/unix"
 )
+
+var (
+	socksClientCache = make(map[string]*socks5.Client)
+	udpClientMu      sync.RWMutex
+)
+
+// 獲取或創建 SOCKS5 客戶端實例
+func getSocksClient(proxyAddr string) (*socks5.Client, error) {
+	udpClientMu.RLock()
+	c, exists := socksClientCache[proxyAddr]
+	udpClientMu.RUnlock()
+	if exists {
+		return c, nil
+	}
+
+	udpClientMu.Lock()
+	defer udpClientMu.Unlock()
+
+	user, pass, addr := parseSocksAddr(proxyAddr)
+	// 緩存實例，避免重複解析地址和分配內存
+	c, err := socks5.NewClient(addr, user, pass, 10, 10)
+	if err == nil {
+		socksClientCache[proxyAddr] = c
+	}
+	return c, err
+}
 
 func setTransparentSocket(network, address string, c syscall.RawConn) error {
 	var err error
@@ -85,25 +110,19 @@ func handleTCP(clientConn net.Conn) {
 	var err error
 
 	if !isDirect {
-		user, pass, addr := parseSocksAddr(upstreamProxy)
-		var auth *proxy.Auth
-		if user != "" {
-			auth = &proxy.Auth{User: user, Password: pass}
-		}
-
-		zap.S().Debugf("[TCP] 匹配代理: %s -> %s", domain, addr)
-		dialer, err := proxy.SOCKS5("tcp", addr, auth, proxy.Direct)
-		if err != nil {
-			zap.S().Errorf("[TCP] 創建 SOCKS5 撥號器失敗: %v", err)
+		client, cErr := getSocksClient(upstreamProxy)
+		if cErr != nil {
+			zap.S().Errorf("[TCP] SOCKS5 客戶端初始化失敗: %v", cErr)
 			return
 		}
-		targetConn, err = dialer.Dial("tcp", targetEndpoint)
+		zap.S().Debugf("[TCP] 匹配代理: %s -> %s", domain, upstreamProxy)
+		targetConn, err = client.Dial("tcp", targetEndpoint)
 
 		if err != nil && strings.Contains(err.Error(), "address type not supported") {
 			zap.S().Warnf("[TCP] 上遊不支持域名解析，嘗試本地解析後發送 IP: %s", domain)
 			ips, _ := defaultResolver.LookupIP(domain)
 			if len(ips) > 0 {
-				targetConn, err = dialer.Dial("tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port))
+				targetConn, err = client.Dial("tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port))
 			}
 		}
 	} else {
@@ -244,16 +263,26 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 		var err error
 
 		if !isDirect {
-			user, pass, addr := parseSocksAddr(upstreamProxy)
-			zap.S().Debugf("[UDP] 匹配代理: %s -> %s", domain, addr)
-			client, err := socks5.NewClient(addr, user, pass, 10, 10)
-			if err != nil {
-				zap.S().Errorf("[UDP] SOCKS5 客戶端創建失敗: %v", err)
+			client, cErr := getSocksClient(upstreamProxy)
+			if cErr != nil {
+				zap.S().Errorf("[UDP] SOCKS5 客戶端初始化失敗: %v", cErr)
 				return
 			}
-			upstreamConn, err = client.Dial("udp", fmt.Sprintf("%s:%d", strings.TrimSuffix(domain, "."), fakeIP.Port))
-			if err != nil {
-				zap.S().Errorf("[UDP] SOCKS5 撥號失敗: %v", err)
+			zap.S().Debugf("[UDP] 匹配代理: %s -> %s", domain, upstreamProxy)
+			targetEndpoint := fmt.Sprintf("%s:%d", strings.TrimSuffix(domain, "."), fakeIP.Port)
+			upstreamConn, err = client.Dial("udp", targetEndpoint)
+			if err != nil && strings.Contains(err.Error(), "address type not supported") {
+				zap.S().Warnf("[UDP] 上遊不支持域名解析，嘗試本地解析後發送 IP: %s", domain)
+				ips, _ := defaultResolver.LookupIP(domain)
+				if len(ips) > 0 {
+					targetEndpointIP := fmt.Sprintf("%s:%d", ips[0].String(), fakeIP.Port)
+					upstreamConn, err = client.Dial("udp", targetEndpointIP)
+				}
+			}
+
+			// 錯誤攔截，防止 upstreamConn 為 nil 導致 Panic
+			if err != nil || upstreamConn == nil {
+				zap.S().Errorf("[UDP] SOCKS5 撥號失敗 %s: %v", domain, err)
 				return
 			}
 		} else {
