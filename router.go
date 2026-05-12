@@ -45,15 +45,18 @@ func (r *DomainRouter) AddRule(domain string, upstream string, rewrite map[strin
 func (r *DomainRouter) MatchNode(domain string) *TrieNode {
 	domain = strings.TrimSuffix(domain, ".")
 	node := r.root
-	parts := strings.Split(domain, ".")
 
 	var lastMatchedNode *TrieNode
 	if node.Upstream != "" {
 		lastMatchedNode = node
 	}
 
-	for i := len(parts) - 1; i >= 0; i-- {
-		child, ok := node.children[parts[i]]
+	rest := domain
+	for rest != "" {
+		var part string
+		part, rest = popLastDomainPart(rest)
+
+		child, ok := node.children[part]
 		if !ok {
 			break
 		}
@@ -63,4 +66,13 @@ func (r *DomainRouter) MatchNode(domain string) *TrieNode {
 		}
 	}
 	return lastMatchedNode
+}
+
+// 获取域名的最后一段和剩余部分。例如输入 "www.google.com"，返回 "com" 和 "www.google"
+func popLastDomainPart(domain string) (part, rest string) {
+	idx := strings.LastIndexByte(domain, '.')
+	if idx == -1 {
+		return domain, "" // 已经是最后一部分了
+	}
+	return domain[idx+1:], domain[:idx]
 }

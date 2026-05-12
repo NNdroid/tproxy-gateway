@@ -19,6 +19,20 @@ import (
 var (
 	socksClientCache = make(map[string]*socks5.Client)
 	udpClientMu      sync.RWMutex
+
+	// TCP 转发用的 32KB 缓冲区池 (io.Copy 默认大小)
+	tcpBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 32*1024)
+		},
+	}
+
+	// UDP Payload 用的 64KB 缓冲区池 (最大 UDP 包大小)
+	udpBufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 65536)
+		},
+	}
 )
 
 // 獲取或創建 SOCKS5 客戶端實例
@@ -35,7 +49,7 @@ func getSocksClient(proxyAddr string) (*socks5.Client, error) {
 
 	user, pass, addr := parseSocksAddr(proxyAddr)
 	// 緩存實例，避免重複解析地址和分配內存
-	c, err := socks5.NewClient(addr, user, pass, 10, 10)
+	c, err := socks5.NewClient(addr, user, pass, 2*60, 2*60)
 	if err == nil {
 		socksClientCache[proxyAddr] = c
 	}
@@ -116,13 +130,35 @@ func handleTCP(clientConn net.Conn) {
 			return
 		}
 		zap.S().Debugf("[TCP] 匹配代理: %s -> %s", domain, upstreamProxy)
-		targetConn, err = client.Dial("tcp", targetEndpoint)
 
-		if err != nil && strings.Contains(err.Error(), "address type not supported") {
-			zap.S().Warnf("[TCP] 上遊不支持域名解析，嘗試本地解析後發送 IP: %s", domain)
-			ips, _ := defaultResolver.LookupIP(domain)
-			if len(ips) > 0 {
-				targetConn, err = client.Dial("tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port))
+		// 重试 (应对 Tor 的首次寻径失败)
+		maxRetries := 5
+		for i := 0; i < maxRetries; i++ {
+			targetConn, err = client.Dial("tcp", targetEndpoint)
+			if err == nil {
+				// 拨号成功，跳出循环
+				break
+			}
+
+			zap.S().Warnf("[TCP] SOCKS5 撥號失敗 (%d/%d): %s, 錯誤: %v", i+1, maxRetries, domain, err)
+
+			// 处理不支持域名的情况 (IP 降级)
+			if strings.Contains(err.Error(), "address type not supported") {
+				zap.S().Warnf("[TCP] 上遊不支持域名解析，嘗試本地解析後發送 IP: %s", domain)
+				ips, _ := defaultResolver.LookupIP(domain)
+				if len(ips) > 0 {
+					targetConn, err = client.Dial("tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port))
+					if err == nil {
+						break
+					}
+				}
+				// 降级 IP 也失败，说明彻底不通，不再重试
+				break
+			}
+
+			// 如果还没到最大重试次数，等待 3 秒后重试 (给 Tor 建立回路的时间)
+			if i < maxRetries-1 {
+				time.Sleep(3 * time.Second)
 			}
 		}
 	} else {
@@ -165,8 +201,32 @@ func handleTCP(clientConn net.Conn) {
 		}
 	}
 
-	go io.Copy(targetConn, clientConn)
-	io.Copy(clientConn, targetConn)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		buf := tcpBufferPool.Get().([]byte)
+		defer tcpBufferPool.Put(buf)
+
+		io.CopyBuffer(targetConn, clientConn, buf)
+		if tc, ok := targetConn.(*net.TCPConn); ok {
+			tc.CloseWrite() // 结合了优化点 1 的优雅半关闭
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		buf := tcpBufferPool.Get().([]byte)
+		defer tcpBufferPool.Put(buf)
+
+		io.CopyBuffer(clientConn, targetConn, buf)
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+
+	wg.Wait()
 }
 
 type UDPSession struct {
@@ -200,17 +260,17 @@ func startUDPTProxy(ctx context.Context, addr string) {
 	for {
 		n, oobn, _, clientAddr, err := udpConn.ReadMsgUDP(buf, oob)
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
 			continue
 		}
 		fakeIPAddr, err := parseIPv6OriginalDst(oob[:oobn])
 		if err != nil {
 			continue
 		}
-		payload := make([]byte, n)
+
+		// 从池中拿一块复用的内存
+		payload := udpBufferPool.Get().([]byte)[:n] // 注意这里截取到 n
 		copy(payload, buf[:n])
+
 		go handleUDP(payload, clientAddr, fakeIPAddr)
 	}
 }
@@ -328,12 +388,19 @@ func listenFromUpstream(sess *UDPSession, clientAddr *net.UDPAddr, fakeIP *net.U
 		sess.UpstreamConn.Close()
 	}()
 
-	buf := make([]byte, 65536)
+	buf := udpBufferPool.Get().([]byte)
+	defer udpBufferPool.Put(buf)
+
 	for {
+		// 如果 3 分钟内没有任何数据返回，Read 就会报错并退出循环，释放协程
+		sess.UpstreamConn.SetReadDeadline(time.Now().Add(3 * time.Minute))
+
 		n, err := sess.UpstreamConn.Read(buf)
 		if err != nil {
+			// 如果是超时导致的 err，正好安全退出
 			return
 		}
+
 		sess.LastActive = time.Now()
 		sendBackToClient(buf[:n], clientAddr, fakeIP)
 	}
