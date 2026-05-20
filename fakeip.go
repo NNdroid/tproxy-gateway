@@ -4,47 +4,91 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 )
 
+// 性能优化：分片锁数量定义
+const ShardCount = 64
+
 type Record struct {
-	IP        string    `json:"ip"`
+	IPs       []string  `json:"ips"` // 一个站点同时持有并绑定多个网段的 FakeIP
 	Domain    string    `json:"domain"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type PersistState struct {
-	Current []byte             `json:"current"`
-	Records map[string]*Record `json:"records"`
+	Currents [][]byte           `json:"currents"` // 持久化保存多个网段的各自游标位置
+	Records  map[string]*Record `json:"records"`  // 改由以 domain 为键进行持久化，防止数据重复
+}
+
+type HostShard struct {
+	mu sync.RWMutex
+	m  map[string]*Record
+}
+
+type IPShard struct {
+	mu sync.RWMutex
+	m  map[string]*Record
 }
 
 type FakeIPPool struct {
-	mu       sync.RWMutex
-	ip2rec   map[string]*Record
-	host2rec map[string]*Record
-	current  net.IP
-	ipnet    *net.IPNet
-	isDirty  bool
+	hostShards [ShardCount]HostShard
+	ipShards   [ShardCount]IPShard
+
+	cursorMu sync.Mutex
+	currents []net.IP     // 多网段独立递增游标
+	ipnets   []*net.IPNet // 多网段范畴保护
+
+	isDirty  atomic.Bool
 	ttl      time.Duration
 	savePath string
 }
 
-func NewFakeIPPool(ctx context.Context, startIP net.IP, ipnet *net.IPNet, ttl time.Duration, savePath string) *FakeIPPool {
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime = 16777619
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= prime
+	}
+	return hash
+}
+
+func fnv32Bytes(key []byte) uint32 {
+	hash := uint32(2166136261)
+	const prime = 16777619
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= prime
+	}
+	return hash
+}
+
+func NewFakeIPPool(ctx context.Context, startIPs []net.IP, ipnets []*net.IPNet, ttl time.Duration, savePath string) *FakeIPPool {
 	pool := &FakeIPPool{
-		ip2rec:   make(map[string]*Record),
-		host2rec: make(map[string]*Record),
-		current:  cloneIP(startIP),
-		ipnet:    ipnet,
+		ipnets:   ipnets,
 		ttl:      ttl,
 		savePath: savePath,
 	}
+
+	for _, sip := range startIPs {
+		pool.currents = append(pool.currents, cloneIP(sip))
+	}
+
+	for i := 0; i < ShardCount; i++ {
+		pool.hostShards[i].m = make(map[string]*Record)
+		pool.ipShards[i].m = make(map[string]*Record)
+	}
+
 	pool.loadFromFile()
 	go pool.startBackgroundTasks(ctx)
 	return pool
@@ -65,64 +109,102 @@ func incIP(ip net.IP) {
 	}
 }
 
-func (p *FakeIPPool) nextIP() net.IP {
+// nextIPForSubnet 在指定索引的 Overlay 网段内捞出一个干净未分配的 IP
+func (p *FakeIPPool) nextIPForSubnet(idx int) net.IP {
 	for {
-		incIP(p.current)
-		if !p.ipnet.Contains(p.current) {
-			zap.S().Warnf("[FakeIP] CIDR 网段 %s 已耗尽，重置游标", p.ipnet.String())
-			p.current = cloneIP(p.ipnet.IP)
-			incIP(p.current)
+		incIP(p.currents[idx])
+		if !p.ipnets[idx].Contains(p.currents[idx]) {
+			zap.S().Warnf("[FakeIP] CIDR 网段 %s 已耗尽，重置游标", p.ipnets[idx].String())
+			p.currents[idx] = cloneIP(p.ipnets[idx].IP)
+			incIP(p.currents[idx])
 		}
-		if _, exists := p.ip2rec[p.current.String()]; !exists {
+
+		ipIdx := fnv32Bytes(p.currents[idx]) % ShardCount
+		shard := &p.ipShards[ipIdx]
+
+		shard.mu.RLock()
+		_, exists := shard.m[string(p.currents[idx])]
+		shard.mu.RUnlock()
+
+		if !exists {
 			break
 		}
 	}
-	return cloneIP(p.current)
+	return cloneIP(p.currents[idx])
 }
 
-func (p *FakeIPPool) GetFakeIP(domain string) net.IP {
+// GetFakeIP 一次性返回全量配置网段对应的多个 FakeIP
+func (p *FakeIPPool) GetFakeIP(domain string) []net.IP {
 	domain = strings.TrimSuffix(domain, ".")
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	hIdx := fnv32(domain) % ShardCount
+	hostShard := &p.hostShards[hIdx]
 
-	if rec, exists := p.host2rec[domain]; exists {
+	// 1. 缓存命中，直接解析并返回已绑定的全量 IP 组合
+	hostShard.mu.Lock()
+	if rec, exists := hostShard.m[domain]; exists {
 		rec.ExpiresAt = time.Now().Add(p.ttl)
-		p.isDirty = true
-		return net.ParseIP(rec.IP)
-	}
+		p.isDirty.Store(true)
+		hostShard.mu.Unlock()
 
-	newIP := p.nextIP()
-	newIPStr := newIP.String()
+		var ips []net.IP
+		for _, ipStr := range rec.IPs {
+			ips = append(ips, net.ParseIP(ipStr))
+		}
+		return ips
+	}
+	hostShard.mu.Unlock()
+
+	// 2. 缓存未命中，在每个指定的子网段中各提取一个可用 IP
+	p.cursorMu.Lock()
+	var newIPs []net.IP
+	var newIPStrs []string
+	for i := 0; i < len(p.ipnets); i++ {
+		nip := p.nextIPForSubnet(i)
+		newIPs = append(newIPs, nip)
+		newIPStrs = append(newIPStrs, nip.String())
+	}
+	p.cursorMu.Unlock()
 
 	rec := &Record{
-		IP:        newIPStr,
+		IPs:       newIPStrs,
 		Domain:    domain,
 		ExpiresAt: time.Now().Add(p.ttl),
 	}
 
-	p.host2rec[domain] = rec
-	p.ip2rec[newIPStr] = rec
-	p.isDirty = true
+	// 3. 将新映射关系同步至各自的分片槽中
+	hostShard.mu.Lock()
+	hostShard.m[domain] = rec
+	hostShard.mu.Unlock()
 
-	zap.S().Debugf("[FakeIP] 分配新 IP: %s -> %s", domain, newIPStr)
-	return newIP
+	for _, ipStr := range newIPStrs {
+		ipIdx := fnv32(ipStr) % ShardCount
+		ipShard := &p.ipShards[ipIdx]
+		ipShard.mu.Lock()
+		ipShard.m[ipStr] = rec
+		ipShard.mu.Unlock()
+	}
+
+	p.isDirty.Store(true)
+	zap.S().Debugf("[FakeIP] 站点 %s 成功映射至多组分流 IP: %v", domain, newIPStrs)
+	return newIPs
 }
 
 func (p *FakeIPPool) LookUp(ipStr string) (string, bool) {
-	p.mu.RLock()
-	rec, exists := p.ip2rec[ipStr]
-	p.mu.RUnlock()
+	ipIdx := fnv32(ipStr) % ShardCount
+	ipShard := &p.ipShards[ipIdx]
 
+	ipShard.mu.Lock()
+	rec, exists := ipShard.m[ipStr]
 	if !exists {
+		ipShard.mu.Unlock()
 		return "", false
 	}
-
-	p.mu.Lock()
 	rec.ExpiresAt = time.Now().Add(p.ttl)
-	p.isDirty = true
-	p.mu.Unlock()
+	p.isDirty.Store(true)
+	domain := rec.Domain
+	ipShard.mu.Unlock()
 
-	return rec.Domain, true
+	return domain, true
 }
 
 func (p *FakeIPPool) startBackgroundTasks(ctx context.Context) {
@@ -145,42 +227,68 @@ func (p *FakeIPPool) startBackgroundTasks(ctx context.Context) {
 }
 
 func (p *FakeIPPool) cleanExpired() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	now := time.Now()
 	count := 0
-	for ipStr, rec := range p.ip2rec {
-		if now.After(rec.ExpiresAt) {
-			delete(p.ip2rec, ipStr)
-			delete(p.host2rec, rec.Domain)
-			p.isDirty = true
-			count++
+
+	for i := 0; i < ShardCount; i++ {
+		ipShard := &p.ipShards[i]
+		ipShard.mu.Lock()
+		for ipStr, rec := range ipShard.m {
+			if now.After(rec.ExpiresAt) {
+				delete(ipShard.m, ipStr)
+
+				hIdx := fnv32(rec.Domain) % ShardCount
+				hostShard := &p.hostShards[hIdx]
+				hostShard.mu.Lock()
+				delete(hostShard.m, rec.Domain)
+				hostShard.mu.Unlock()
+
+				p.isDirty.Store(true)
+				count++
+			}
 		}
+		ipShard.mu.Unlock()
 	}
+
 	if count > 0 {
 		zap.S().Debugf("[FakeIP] 清理了 %d 条过期记录", count)
 	}
 }
 
 func (p *FakeIPPool) saveToFileIfDirty() {
-	p.mu.Lock()
-	if !p.isDirty {
-		p.mu.Unlock()
+	if !p.isDirty.Load() {
 		return
 	}
 
+	allRecords := make(map[string]*Record)
+	for i := 0; i < ShardCount; i++ {
+		hostShard := &p.hostShards[i]
+		hostShard.mu.RLock()
+		for k, v := range hostShard.m {
+			allRecords[k] = v
+		}
+		hostShard.mu.RUnlock()
+	}
+
+	p.cursorMu.Lock()
+	var currentsCopy [][]byte
+	for _, cur := range p.currents {
+		currentsCopy = append(currentsCopy, []byte(cloneIP(cur)))
+	}
+	p.cursorMu.Unlock()
+
 	state := PersistState{
-		Current: []byte(p.current),
-		Records: p.ip2rec,
+		Currents: currentsCopy,
+		Records:  allRecords,
 	}
 	data, _ := json.MarshalIndent(state, "", "  ")
-	p.isDirty = false
-	p.mu.Unlock()
+	p.isDirty.Store(false)
 
 	tempFile := p.savePath + ".tmp"
-	os.WriteFile(tempFile, data, 0644)
-	os.Rename(tempFile, p.savePath)
-	zap.S().Debugf("[FakeIP] 内存数据发生变更，已异步落盘至 %s", p.savePath)
+	if err := os.WriteFile(tempFile, data, 0644); err == nil {
+		os.Rename(tempFile, p.savePath)
+		zap.S().Debugf("[FakeIP] 内存数据发生变更，已异步落盘至 %s", p.savePath)
+	}
 }
 
 func (p *FakeIPPool) loadFromFile() {
@@ -195,31 +303,37 @@ func (p *FakeIPPool) loadFromFile() {
 		return
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	recoveredCurrent := net.IP(state.Current)
-	if len(recoveredCurrent) == 16 && p.ipnet.Contains(recoveredCurrent) {
-		p.current = cloneIP(recoveredCurrent)
+	if len(state.Currents) == len(p.ipnets) {
+		for i, curBytes := range state.Currents {
+			recoveredCurrent := net.IP(curBytes)
+			if len(recoveredCurrent) == 16 && p.ipnets[i].Contains(recoveredCurrent) {
+				p.currents[i] = cloneIP(recoveredCurrent)
+			}
+		}
 	}
 
 	now := time.Now()
 	validCount := 0
-	for _, rec := range state.Records {
-		if now.After(rec.ExpiresAt) || !p.ipnet.Contains(net.ParseIP(rec.IP)) {
+	for domain, rec := range state.Records {
+		if now.After(rec.ExpiresAt) {
 			continue
 		}
-		p.ip2rec[rec.IP] = rec
-		p.host2rec[rec.Domain] = rec
+
+		hIdx := fnv32(domain) % ShardCount
+		hostShard := &p.hostShards[hIdx]
+		hostShard.m[domain] = rec
+
+		for _, ipStr := range rec.IPs {
+			ipIdx := fnv32(ipStr) % ShardCount
+			p.ipShards[ipIdx].m[ipStr] = rec
+		}
 		validCount++
 	}
 	zap.S().Infof("[FakeIP] 成功从 %s 恢复了 %d 条有效记录", p.savePath, validCount)
 }
 
 func (p *FakeIPPool) Close() {
-	p.mu.Lock()
-	p.isDirty = true
-	p.mu.Unlock()
+	p.isDirty.Store(true)
 	p.saveToFileIfDirty()
 }
 
@@ -229,10 +343,20 @@ func startDNSServer(ctx context.Context, addr string) {
 		m.SetReply(r)
 		for _, q := range r.Question {
 			if q.Qtype == dns.TypeAAAA {
-				fakeIP := pool.GetFakeIP(q.Name)
-				rr, _ := dns.NewRR(fmt.Sprintf("%s AAAA %s", q.Name, fakeIP.String()))
-				if rr != nil {
-					m.Answer = append(m.Answer, rr)
+				fakeIPs := pool.GetFakeIP(q.Name)
+
+				// 对返回的 FakeIP 数组执行洗牌算法（Shuffle）打散顺序
+				// 由于 GetFakeIP 每次命中都会生成一个全新的切片，因此直接在原数组上无污染打散即可
+				rand.Shuffle(len(fakeIPs), func(i, j int) {
+					fakeIPs[i], fakeIPs[j] = fakeIPs[j], fakeIPs[i]
+				})
+
+				// 依次打包写入 Answer 队列中传回
+				for _, fakeIP := range fakeIPs {
+					rr, _ := dns.NewRR(fmt.Sprintf("%s AAAA %s", q.Name, fakeIP.String()))
+					if rr != nil {
+						m.Answer = append(m.Answer, rr)
+					}
 				}
 			}
 		}

@@ -29,12 +29,16 @@ type ServerConfig struct {
 type RoutingConfig struct {
 	DefaultUpstream string `yaml:"default_upstream"`
 	DefaultDNS      string `yaml:"default_dns"`
+	Fwmark          int    `yaml:"fwmark"`
+	Table           int    `yaml:"table"`
+	NftTable        string `yaml:"nft_table"`
+	AutoRoute       bool   `yaml:"auto_route"`
 }
 
 type FakeIPConfig struct {
-	CIDR        string `yaml:"cidr"`
-	TTL         string `yaml:"ttl"`
-	PersistFile string `yaml:"persist_file"`
+	CIDRs       []string `yaml:"cidrs"`
+	TTL         string   `yaml:"ttl"`
+	PersistFile string   `yaml:"persist_file"`
 }
 
 type RuleConfig struct {
@@ -63,25 +67,44 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Server.TProxyAddr == "" {
 		cfg.Server.TProxyAddr = "[::]:10800"
 	}
-	if cfg.FakeIP.CIDR == "" {
-		cfg.FakeIP.CIDR = "fd00::/8"
+	if len(cfg.FakeIP.CIDRs) == 0 {
+		cfg.FakeIP.CIDRs = []string{"fd00::/8"}
 	}
 	if cfg.Routing.DefaultUpstream == "" {
 		cfg.Routing.DefaultUpstream = "DIRECT"
 	}
 
+	if cfg.Routing.Fwmark == 0 {
+		cfg.Routing.Fwmark = 1
+	}
+	if cfg.Routing.Table == 0 {
+		cfg.Routing.Table = 1
+	}
+	if cfg.Routing.NftTable == "" {
+		cfg.Routing.NftTable = "tproxy_gw"
+	}
+
 	return &cfg, nil
 }
 
-func (c *FakeIPConfig) ParseCIDR() (net.IP, *net.IPNet, error) {
-	ip, ipnet, err := net.ParseCIDR(c.CIDR)
-	if err != nil {
-		return nil, nil, err
+func (c *FakeIPConfig) ParseCIDRs() ([]net.IP, []*net.IPNet, error) {
+	var starts []net.IP
+	var nets []*net.IPNet
+	for _, cidr := range c.CIDRs {
+		ip, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, nil, err
+		}
+		if ip.To16() == nil {
+			return nil, nil, fmt.Errorf("FakeIP 必須使用 IPv6 CIDR: %s", cidr)
+		}
+		starts = append(starts, ip.To16())
+		nets = append(nets, ipnet)
 	}
-	if ip.To16() == nil {
-		return nil, nil, fmt.Errorf("FakeIP 必須使用 IPv6 CIDR: %s", c.CIDR)
+	if len(nets) == 0 {
+		return nil, nil, fmt.Errorf("必须至少配置一个有效的 FakeIP CIDR 网段")
 	}
-	return ip.To16(), ipnet, nil
+	return starts, nets, nil
 }
 
 func parseSocksAddr(rawAddr string) (user, pass, addr string) {

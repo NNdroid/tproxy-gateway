@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,7 +45,8 @@ func main() {
 	zap.S().Infof("默認 DNS 已加載: [%s] -> %s", defaultResolver.Scheme, defaultResolver.HostPort)
 
 	ttl, _ := time.ParseDuration(cfg.FakeIP.TTL)
-	startIP, ipnet, err := cfg.FakeIP.ParseCIDR()
+
+	startIPs, ipnets, err := cfg.FakeIP.ParseCIDRs()
 	if err != nil {
 		zap.S().Fatalf("CIDR 錯誤: %v", err)
 	}
@@ -49,7 +54,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool = NewFakeIPPool(ctx, startIP, ipnet, ttl, cfg.FakeIP.PersistFile)
+	pool = NewFakeIPPool(ctx, startIPs, ipnets, ttl, cfg.FakeIP.PersistFile)
 	router = NewDomainRouter()
 
 	for _, rCfg := range cfg.Rules {
@@ -58,6 +63,8 @@ func main() {
 			router.AddRule(domain, rCfg.Proxy, rCfg.HeaderRewrite)
 		}
 	}
+
+	setupAutoRoute()
 
 	go startDNSServer(ctx, cfg.Server.DNSAddr)
 	go startTCPTProxy(ctx, cfg.Server.TProxyAddr)
@@ -76,5 +83,65 @@ func main() {
 
 	zap.S().Infof("正在保存緩存並安全關閉...")
 	pool.Close()
+
+	cleanupAutoRoute()
+
 	zap.S().Sync()
+}
+
+func setupAutoRoute() {
+	if !cfg.Routing.AutoRoute {
+		return
+	}
+	zap.S().Infof("[AutoRoute] 托管启动 -> 路由表:%d | 防火墙Mark:%d | Nftables表名:%s", cfg.Routing.Table, cfg.Routing.Fwmark, cfg.Routing.NftTable)
+
+	tableStr := strconv.Itoa(cfg.Routing.Table)
+	markStr := strconv.Itoa(cfg.Routing.Fwmark)
+
+	exec.Command("ip", "-6", "rule", "add", "fwmark", markStr+"/"+markStr, "table", tableStr).Run()
+	exec.Command("ip", "-6", "route", "add", "local", "::/0", "dev", "lo", "table", tableStr).Run()
+
+	_, port, err := net.SplitHostPort(cfg.Server.TProxyAddr)
+	if err != nil {
+		idx := strings.LastIndex(cfg.Server.TProxyAddr, ":")
+		if idx != -1 {
+			port = cfg.Server.TProxyAddr[idx+1:]
+		} else {
+			port = "10800"
+		}
+	}
+
+	var nftRules strings.Builder
+	nftRules.WriteString(fmt.Sprintf("table inet %s {\n", cfg.Routing.NftTable))
+	nftRules.WriteString("    chain prerouting {\n")
+	nftRules.WriteString("        type filter hook prerouting priority mangle; policy accept;\n")
+	for _, cidr := range cfg.FakeIP.CIDRs {
+		nftRules.WriteString(fmt.Sprintf("        ip6 daddr %s meta l4proto { tcp, udp } tproxy ip6 to [::1]:%s meta mark set %s accept\n", cidr, port, markStr))
+	}
+	nftRules.WriteString("    }\n")
+	nftRules.WriteString("}\n")
+
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(nftRules.String())
+	if err := cmd.Run(); err != nil {
+		zap.S().Errorf("[AutoRoute] 动态加载 nftables 失败: %v", err)
+	} else {
+		zap.S().Infof("[AutoRoute] nftables 防火墙托管链构建成功。")
+	}
+}
+
+func cleanupAutoRoute() {
+	if !cfg.Routing.AutoRoute {
+		return
+	}
+	zap.S().Infof("[AutoRoute] 正在清理策略路由与 nftables 规则...")
+
+	tableStr := strconv.Itoa(cfg.Routing.Table)
+	markStr := strconv.Itoa(cfg.Routing.Fwmark)
+
+	exec.Command("ip", "-6", "rule", "del", "fwmark", markStr+"/"+markStr, "table", tableStr).Run()
+	exec.Command("ip", "-6", "route", "del", "local", "::/0", "dev", "lo", "table", tableStr).Run()
+
+	exec.Command("nft", "delete", "table", "inet", cfg.Routing.NftTable).Run()
+	zap.S().Infof("[AutoRoute] 防火墙与路由表环境恢复纯净。")
 }

@@ -22,12 +22,14 @@ type dnsCacheEntry struct {
 }
 
 type DefaultResolver struct {
-	Scheme   string
-	HostPort string
-	Path     string
-	SNI      string
-	cache    sync.Map
-	cacheTTL time.Duration
+	Scheme     string
+	HostPort   string
+	Path       string
+	SNI        string
+	cache      sync.Map
+	cacheTTL   time.Duration
+	httpClient *http.Client // 全局复用 HTTP 客户端（长连接保持）
+	dnsClient  *dns.Client  // 全局复用 DNS 客户端
 }
 
 func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
@@ -69,6 +71,29 @@ func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
 		SNI:      u.Query().Get("sni"),
 		cacheTTL: 5 * time.Minute, // 預設快取 5 分鐘
 	}
+
+	// 提前实例化复用客户端，避免每次查询触发三次握手和 TLS 握手
+	if resolver.Scheme == "doh" {
+		resolver.httpClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig:     &tls.Config{ServerName: resolver.SNI},
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 5 * time.Second,
+			},
+			Timeout: 5 * time.Second,
+		}
+	} else if resolver.Scheme == "dot" || resolver.Scheme == "tcp" || resolver.Scheme == "udp" {
+		resolver.dnsClient = &dns.Client{
+			Net:     resolver.Scheme,
+			Timeout: 5 * time.Second,
+		}
+		if resolver.Scheme == "dot" {
+			resolver.dnsClient.Net = "tcp-tls"
+			resolver.dnsClient.TLSConfig = &tls.Config{ServerName: resolver.SNI}
+		}
+	}
+
 	// 啟動背景定期清理過期快取 (每分鐘清理一次)
 	go resolver.startCacheCleaner()
 	return resolver, nil
@@ -100,17 +125,8 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 		var err error
 
 		switch r.Scheme {
-		case "udp", "tcp":
-			c := new(dns.Client)
-			c.Net = r.Scheme
-			c.Timeout = 5 * time.Second
-			in, _, err = c.Exchange(m, r.HostPort)
-		case "dot":
-			c := new(dns.Client)
-			c.Net = "tcp-tls"
-			c.Timeout = 5 * time.Second
-			c.TLSConfig = &tls.Config{ServerName: r.SNI}
-			in, _, err = c.Exchange(m, r.HostPort)
+		case "udp", "tcp", "dot":
+			in, _, err = r.dnsClient.Exchange(m, r.HostPort)
 		case "doh":
 			in, err = r.exchangeDoH(m)
 		default:
@@ -236,14 +252,7 @@ func (r *DefaultResolver) exchangeDoH(m *dns.Msg) (*dns.Msg, error) {
 		req.Host = r.SNI
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{ServerName: r.SNI},
-		},
-		Timeout: 5 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

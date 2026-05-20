@@ -16,6 +16,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type udpKey struct {
+	clientIP   [16]byte
+	fakeIP     [16]byte
+	clientPort uint16
+	fakePort   uint16
+}
+
+type UDPSession struct {
+	UpstreamConn     net.Conn
+	ClientReturnConn net.Conn // 驻缓存返回客户端的物理 Socket，拒绝单包重拨
+	LastActive       time.Time
+}
+
 var (
 	socksClientCache = make(map[string]*socks5.Client)
 	udpClientMu      sync.RWMutex
@@ -33,7 +46,20 @@ var (
 			return make([]byte, 65536)
 		},
 	}
+
+	udpSessions = make(map[udpKey]*UDPSession)
+	sessionMu   sync.RWMutex
 )
+
+// 生成零堆分配分配的 udpKey
+func newUDPKey(clientAddr, fakeIP *net.UDPAddr) udpKey {
+	var k udpKey
+	copy(k.clientIP[:], clientAddr.IP.To16())
+	copy(k.fakeIP[:], fakeIP.IP.To16())
+	k.clientPort = uint16(clientAddr.Port)
+	k.fakePort = uint16(fakeIP.Port)
+	return k
+}
 
 // 獲取或創建 SOCKS5 客戶端實例
 func getSocksClient(proxyAddr string) (*socks5.Client, error) {
@@ -229,23 +255,13 @@ func handleTCP(clientConn net.Conn) {
 	wg.Wait()
 }
 
-type UDPSession struct {
-	UpstreamConn net.Conn
-	LastActive   time.Time
-}
-
-var (
-	udpSessions = make(map[string]*UDPSession)
-	sessionMu   sync.RWMutex
-)
-
 func startUDPTProxy(ctx context.Context, addr string) {
 	lc := net.ListenConfig{Control: setTransparentSocket}
 	packetConn, err := lc.ListenPacket(context.Background(), "udp6", addr)
 	if err != nil {
 		zap.S().Fatalf("UDP TProxy 失敗: %v", err)
 	}
-	zap.S().Infof("UDP TProxy 啟動於 %s", addr)
+	zap.S().Infof("UDP TProxy 啟端於 %s", addr)
 	udpConn := packetConn.(*net.UDPConn)
 
 	go func() {
@@ -267,8 +283,7 @@ func startUDPTProxy(ctx context.Context, addr string) {
 			continue
 		}
 
-		// 从池中拿一块复用的内存
-		payload := udpBufferPool.Get().([]byte)[:n] // 注意这里截取到 n
+		payload := udpBufferPool.Get().([]byte)[:n]
 		copy(payload, buf[:n])
 
 		go handleUDP(payload, clientAddr, fakeIPAddr)
@@ -293,7 +308,7 @@ func parseIPv6OriginalDst(oob []byte) (*net.UDPAddr, error) {
 }
 
 func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
-	sessionKey := fmt.Sprintf("%s_%s", clientAddr.String(), fakeIP.String())
+	sessionKey := newUDPKey(clientAddr, fakeIP) // 高速查表，零分配
 
 	sessionMu.RLock()
 	sess, exists := udpSessions[sessionKey]
@@ -340,7 +355,6 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 				}
 			}
 
-			// 錯誤攔截，防止 upstreamConn 為 nil 導致 Panic
 			if err != nil || upstreamConn == nil {
 				zap.S().Errorf("[UDP] SOCKS5 撥號失敗 %s: %v", domain, err)
 				return
@@ -361,12 +375,34 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 			}
 		}
 
-		sess = &UDPSession{UpstreamConn: upstreamConn, LastActive: time.Now()}
+		dialer := net.Dialer{
+			LocalAddr: fakeIP,
+			Control: func(network, address string, c syscall.RawConn) error {
+				var err error
+				c.Control(func(fd uintptr) {
+					err = unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
+				})
+				return err
+			},
+		}
+		returnConn, err := dialer.Dial("udp6", clientAddr.String())
+		if err != nil {
+			zap.S().Errorf("[UDP] 无法建立回传 Socket %v", err)
+			upstreamConn.Close()
+			return
+		}
+
+		sess = &UDPSession{
+			UpstreamConn:     upstreamConn,
+			ClientReturnConn: returnConn, // 锁入会话中
+			LastActive:       time.Now(),
+		}
+
 		sessionMu.Lock()
 		udpSessions[sessionKey] = sess
 		sessionMu.Unlock()
 
-		go listenFromUpstream(sess, clientAddr, fakeIP, sessionKey)
+		go listenFromUpstream(sess, sessionKey)
 	}
 
 	sess.LastActive = time.Now()
@@ -377,50 +413,31 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 		delete(udpSessions, sessionKey)
 		sessionMu.Unlock()
 		sess.UpstreamConn.Close()
+		sess.ClientReturnConn.Close()
 	}
 }
 
-func listenFromUpstream(sess *UDPSession, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr, sessionKey string) {
+func listenFromUpstream(sess *UDPSession, sessionKey udpKey) {
 	defer func() {
 		sessionMu.Lock()
 		delete(udpSessions, sessionKey)
 		sessionMu.Unlock()
 		sess.UpstreamConn.Close()
+		sess.ClientReturnConn.Close() // 同步销毁两端 Socket 物理层
 	}()
 
 	buf := udpBufferPool.Get().([]byte)
 	defer udpBufferPool.Put(buf)
 
 	for {
-		// 如果 3 分钟内没有任何数据返回，Read 就会报错并退出循环，释放协程
 		sess.UpstreamConn.SetReadDeadline(time.Now().Add(3 * time.Minute))
-
 		n, err := sess.UpstreamConn.Read(buf)
 		if err != nil {
-			// 如果是超时导致的 err，正好安全退出
 			return
 		}
 
 		sess.LastActive = time.Now()
-		sendBackToClient(buf[:n], clientAddr, fakeIP)
-	}
-}
-
-func sendBackToClient(data []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
-	dialer := net.Dialer{
-		LocalAddr: fakeIP,
-		Control: func(network, address string, c syscall.RawConn) error {
-			var err error
-			c.Control(func(fd uintptr) {
-				err = unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
-			})
-			return err
-		},
-	}
-	conn, _ := dialer.Dial("udp6", clientAddr.String())
-	if conn != nil {
-		conn.Write(data)
-		conn.Close()
+		sess.ClientReturnConn.Write(buf[:n])
 	}
 }
 
@@ -439,6 +456,7 @@ func startUDPSweeper(ctx context.Context) {
 			for key, sess := range udpSessions {
 				if now.Sub(sess.LastActive) > 3*time.Minute {
 					sess.UpstreamConn.Close()
+					sess.ClientReturnConn.Close() // 全面安全释放
 					delete(udpSessions, key)
 				}
 			}
