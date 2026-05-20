@@ -363,14 +363,26 @@ func startDNSServer(ctx context.Context, addr string) {
 		w.WriteMsg(m)
 	})
 
-	server := &dns.Server{Addr: addr, Net: "udp"}
-	zap.S().Infof("FakeIP DNS 启动于 udp://%s", addr)
+	udpServer := &dns.Server{Addr: addr, Net: "udp"}
+	tcpServer := &dns.Server{Addr: addr, Net: "tcp"}
+	zap.S().Infof("FakeIP DNS 启动完成 -> [udp://%s] 和 [tcp://%s]", addr, addr)
 
 	go func() {
 		<-ctx.Done()
 		zap.S().Infof("[DNS] 正在关闭 FakeIP DNS 服务器...")
-		server.ShutdownContext(context.Background())
+		udpServer.ShutdownContext(context.Background())
+		tcpServer.ShutdownContext(context.Background())
 	}()
 
-	server.ListenAndServe()
+	go func() {
+		if err := tcpServer.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			zap.S().Errorf("TCP DNS 服务器发生致命故障退出: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := udpServer.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			zap.S().Errorf("UDP DNS 服务器发生致命故障退出: %v", err)
+		}
+	}()
 }

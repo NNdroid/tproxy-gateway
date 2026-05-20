@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"os/signal"
 	"strconv"
@@ -51,8 +50,8 @@ func main() {
 		zap.S().Fatalf("CIDR 錯誤: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	pool = NewFakeIPPool(ctx, startIPs, ipnets, ttl, cfg.FakeIP.PersistFile)
 	router = NewDomainRouter()
@@ -73,18 +72,27 @@ func main() {
 
 	zap.S().Infof("🚀 TProxy 網關啟動完成 (日誌級別: %s)", strings.ToUpper(cfg.Log.Level))
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	<-ctx.Done()
 
-	zap.S().Infof("接收到退出信號，觸發全局 Cancel...")
-	cancel()
-	time.Sleep(1 * time.Second)
+	zap.S().Infof("接收到退出信號，啟動平滑關閉流程...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	
+	cleanupDone := make(chan struct{})
 
-	zap.S().Infof("正在保存緩存並安全關閉...")
-	pool.Close()
+	go func() {
+		zap.S().Infof("正在保存快取並安全關閉...")
+		pool.Close()         // 資料強制無鎖安全落盘
+		cleanupAutoRoute()   // 清理策略路由與防火牆規則
+		close(cleanupDone)
+	}()
 
-	cleanupAutoRoute()
+	select {
+	case <-cleanupDone:
+		zap.S().Infof("🎉 所有後台任務與防火牆環境已完美恢復純淨，安全退出。")
+	case <-shutdownCtx.Done():
+		zap.S().Errorf("⚠️ 警告: 清理超時（超過 5 秒），為防進程掛起，網關實施強行終止！")
+	}
 
 	zap.S().Sync()
 }
