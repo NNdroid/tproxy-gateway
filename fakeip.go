@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -16,18 +16,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// 性能优化：分片锁数量定义
-const ShardCount = 64
+const ShardCount = 32
 
 type Record struct {
-	IPs       []string  `json:"ips"` // 一个站点同时持有并绑定多个网段的 FakeIP
-	Domain    string    `json:"domain"`
-	ExpiresAt time.Time `json:"expires_at"`
+	IPs       []netip.Addr `json:"ips"`
+	Domain    string       `json:"domain"`
+	ExpiresAt time.Time    `json:"expires_at"`
 }
 
 type PersistState struct {
-	Currents [][]byte           `json:"currents"` // 持久化保存多个网段的各自游标位置
-	Records  map[string]*Record `json:"records"`  // 改由以 domain 为键进行持久化，防止数据重复
+	V4Currents []netip.Addr       `json:"v4_currents"`
+	V6Currents []netip.Addr       `json:"v6_currents"`
+	Records    map[string]*Record `json:"records"`
 }
 
 type HostShard struct {
@@ -37,16 +37,18 @@ type HostShard struct {
 
 type IPShard struct {
 	mu sync.RWMutex
-	m  map[string]*Record
+	m  map[netip.Addr]*Record
 }
 
 type FakeIPPool struct {
 	hostShards [ShardCount]HostShard
 	ipShards   [ShardCount]IPShard
 
-	cursorMu sync.Mutex
-	currents []net.IP     // 多网段独立递增游标
-	ipnets   []*net.IPNet // 多网段范畴保护
+	cursorMu   sync.Mutex
+	v4Currents []netip.Addr
+	v4Prefixes []netip.Prefix
+	v6Currents []netip.Addr
+	v6Prefixes []netip.Prefix
 
 	isDirty  atomic.Bool
 	ttl      time.Duration
@@ -63,138 +65,189 @@ func fnv32(key string) uint32 {
 	return hash
 }
 
-func fnv32Bytes(key []byte) uint32 {
+func fnv32Addr(addr netip.Addr) uint32 {
+	b := addr.Unmap().As16()
 	hash := uint32(2166136261)
 	const prime = 16777619
-	for i := 0; i < len(key); i++ {
-		hash ^= uint32(key[i])
+	for i := 0; i < len(b); i++ {
+		hash ^= uint32(b[i])
 		hash *= prime
 	}
 	return hash
 }
 
-func NewFakeIPPool(ctx context.Context, startIPs []net.IP, ipnets []*net.IPNet, ttl time.Duration, savePath string) *FakeIPPool {
-	pool := &FakeIPPool{
-		ipnets:   ipnets,
-		ttl:      ttl,
-		savePath: savePath,
+func NewFakeIPPool(ctx context.Context, parsed *ParsedCIDRs, ttl time.Duration, savePath string) *FakeIPPool {
+	p := &FakeIPPool{
+		v4Prefixes: parsed.V4Prefixes,
+		v6Prefixes: parsed.V6Prefixes,
+		ttl:        ttl,
+		savePath:   savePath,
 	}
 
-	for _, sip := range startIPs {
-		pool.currents = append(pool.currents, cloneIP(sip))
+	for _, sip := range parsed.V4Starts {
+		p.v4Currents = append(p.v4Currents, sip)
+	}
+	for _, sip := range parsed.V6Starts {
+		p.v6Currents = append(p.v6Currents, sip)
 	}
 
 	for i := 0; i < ShardCount; i++ {
-		pool.hostShards[i].m = make(map[string]*Record)
-		pool.ipShards[i].m = make(map[string]*Record)
+		p.hostShards[i].m = make(map[string]*Record)
+		p.ipShards[i].m = make(map[netip.Addr]*Record)
 	}
 
-	pool.loadFromFile()
-	go pool.startBackgroundTasks(ctx)
-	return pool
+	p.loadFromFile()
+	go p.startBackgroundTasks(ctx)
+	return p
 }
 
-func cloneIP(ip net.IP) net.IP {
-	dup := make(net.IP, len(ip))
-	copy(dup, ip)
-	return dup
-}
-
-func incIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
-	}
-}
-
-// nextIPForSubnet 在指定索引的 Overlay 网段内捞出一个干净未分配的 IP
-func (p *FakeIPPool) nextIPForSubnet(idx int) net.IP {
+func (p *FakeIPPool) nextV4ForSubnet(idx int) netip.Addr {
+	cur := p.v4Currents[idx]
+	prefix := p.v4Prefixes[idx]
 	for {
-		incIP(p.currents[idx])
-		if !p.ipnets[idx].Contains(p.currents[idx]) {
-			zap.S().Warnf("[FakeIP] CIDR 网段 %s 已耗尽，重置游标", p.ipnets[idx].String())
-			p.currents[idx] = cloneIP(p.ipnets[idx].IP)
-			incIP(p.currents[idx])
+		cur = cur.Next().Unmap()
+		if !prefix.Contains(cur) {
+			cur = prefix.Addr().Unmap()
+			cur = cur.Next().Unmap()
 		}
+		if cur == prefix.Addr().Unmap() {
+			cur = cur.Next().Unmap()
+		}
+		p.v4Currents[idx] = cur
 
-		ipIdx := fnv32Bytes(p.currents[idx]) % ShardCount
-		shard := &p.ipShards[ipIdx]
-
-		shard.mu.RLock()
-		_, exists := shard.m[string(p.currents[idx])]
-		shard.mu.RUnlock()
+		ipIdx := fnv32Addr(cur) % ShardCount
+		ipShard := &p.ipShards[ipIdx]
+		ipShard.mu.RLock()
+		_, exists := ipShard.m[cur]
+		ipShard.mu.RUnlock()
 
 		if !exists {
 			break
 		}
 	}
-	return cloneIP(p.currents[idx])
+	return p.v4Currents[idx]
 }
 
-// GetFakeIP 一次性返回全量配置网段对应的多个 FakeIP
-func (p *FakeIPPool) GetFakeIP(domain string) []net.IP {
+func (p *FakeIPPool) nextV6ForSubnet(idx int) netip.Addr {
+	cur := p.v6Currents[idx]
+	prefix := p.v6Prefixes[idx]
+	for {
+		cur = cur.Next().Unmap()
+		if !prefix.Contains(cur) {
+			cur = prefix.Addr().Unmap()
+			cur = cur.Next().Unmap()
+		}
+		if cur == prefix.Addr().Unmap() {
+			cur = cur.Next().Unmap()
+		}
+		p.v6Currents[idx] = cur
+
+		ipIdx := fnv32Addr(cur) % ShardCount
+		ipShard := &p.ipShards[ipIdx]
+		ipShard.mu.RLock()
+		_, exists := ipShard.m[cur]
+		ipShard.mu.RUnlock()
+
+		if !exists {
+			break
+		}
+	}
+	return p.v6Currents[idx]
+}
+
+func (p *FakeIPPool) GetFakeIP(domain string) []netip.Addr {
 	domain = strings.TrimSuffix(domain, ".")
+	if GlobalAnalytics != nil {
+		GlobalAnalytics.RecordDNSQuery(domain)
+	}
 	hIdx := fnv32(domain) % ShardCount
 	hostShard := &p.hostShards[hIdx]
 
-	// 1. 缓存命中，直接解析并返回已绑定的全量 IP 组合
 	hostShard.mu.Lock()
 	if rec, exists := hostShard.m[domain]; exists {
 		rec.ExpiresAt = time.Now().Add(p.ttl)
 		p.isDirty.Store(true)
 		hostShard.mu.Unlock()
 
-		var ips []net.IP
-		for _, ipStr := range rec.IPs {
-			ips = append(ips, net.ParseIP(ipStr))
-		}
+		ips := make([]netip.Addr, len(rec.IPs))
+		copy(ips, rec.IPs)
 		return ips
 	}
 	hostShard.mu.Unlock()
 
-	// 2. 缓存未命中，在每个指定的子网段中各提取一个可用 IP
 	p.cursorMu.Lock()
-	var newIPs []net.IP
-	var newIPStrs []string
-	for i := 0; i < len(p.ipnets); i++ {
-		nip := p.nextIPForSubnet(i)
-		newIPs = append(newIPs, nip)
-		newIPStrs = append(newIPStrs, nip.String())
+	var newIPs []netip.Addr
+	for i := 0; i < len(p.v4Prefixes); i++ {
+		newIPs = append(newIPs, p.nextV4ForSubnet(i).Unmap())
+	}
+	for i := 0; i < len(p.v6Prefixes); i++ {
+		newIPs = append(newIPs, p.nextV6ForSubnet(i).Unmap())
 	}
 	p.cursorMu.Unlock()
 
 	rec := &Record{
-		IPs:       newIPStrs,
+		IPs:       newIPs,
 		Domain:    domain,
 		ExpiresAt: time.Now().Add(p.ttl),
 	}
 
-	// 3. 将新映射关系同步至各自的分片槽中
 	hostShard.mu.Lock()
 	hostShard.m[domain] = rec
 	hostShard.mu.Unlock()
 
-	for _, ipStr := range newIPStrs {
-		ipIdx := fnv32(ipStr) % ShardCount
+	for _, nip := range newIPs {
+		nip = nip.Unmap()
+		ipIdx := fnv32Addr(nip) % ShardCount
 		ipShard := &p.ipShards[ipIdx]
 		ipShard.mu.Lock()
-		ipShard.m[ipStr] = rec
+		ipShard.m[nip] = rec
 		ipShard.mu.Unlock()
 	}
 
 	p.isDirty.Store(true)
-	zap.S().Debugf("[FakeIP] 站点 %s 成功映射至多组分流 IP: %v", domain, newIPStrs)
+	p.updateMetricsTotal()
 	return newIPs
 }
 
-func (p *FakeIPPool) LookUp(ipStr string) (string, bool) {
-	ipIdx := fnv32(ipStr) % ShardCount
+func (p *FakeIPPool) updateMetricsTotal() {
+	count := 0
+	for i := 0; i < ShardCount; i++ {
+		p.hostShards[i].mu.RLock()
+		count += len(p.hostShards[i].m)
+		p.hostShards[i].mu.RUnlock()
+	}
+	Metrics.FakeIPRecordsTotal.Store(int64(count))
+}
+
+func (p *FakeIPPool) GetFakeIPv4(domain string) []netip.Addr {
+	all := p.GetFakeIP(domain)
+	var v4s []netip.Addr
+	for _, ip := range all {
+		if ip.Is4() {
+			v4s = append(v4s, ip)
+		}
+	}
+	return v4s
+}
+
+func (p *FakeIPPool) GetFakeIPv6(domain string) []netip.Addr {
+	all := p.GetFakeIP(domain)
+	var v6s []netip.Addr
+	for _, ip := range all {
+		if ip.Is6() {
+			v6s = append(v6s, ip)
+		}
+	}
+	return v6s
+}
+
+func (p *FakeIPPool) LookUpAddr(addr netip.Addr) (string, bool) {
+	addr = addr.Unmap()
+	ipIdx := fnv32Addr(addr) % ShardCount
 	ipShard := &p.ipShards[ipIdx]
 
 	ipShard.mu.Lock()
-	rec, exists := ipShard.m[ipStr]
+	rec, exists := ipShard.m[addr]
 	if !exists {
 		ipShard.mu.Unlock()
 		return "", false
@@ -207,6 +260,14 @@ func (p *FakeIPPool) LookUp(ipStr string) (string, bool) {
 	return domain, true
 }
 
+func (p *FakeIPPool) LookUp(ipStr string) (string, bool) {
+	addr, err := netip.ParseAddr(ipStr)
+	if err != nil {
+		return "", false
+	}
+	return p.LookUpAddr(addr)
+}
+
 func (p *FakeIPPool) startBackgroundTasks(ctx context.Context) {
 	cleanupTicker := time.NewTicker(1 * time.Minute)
 	saveTicker := time.NewTicker(5 * time.Second)
@@ -216,7 +277,7 @@ func (p *FakeIPPool) startBackgroundTasks(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			zap.S().Infof("[FakeIP] 停止后台清理与持久化任务")
+			zap.S().Infof("[FakeIP] Stopping background cleaner and persistence tasks")
 			return
 		case <-cleanupTicker.C:
 			p.cleanExpired()
@@ -232,26 +293,30 @@ func (p *FakeIPPool) cleanExpired() {
 
 	for i := 0; i < ShardCount; i++ {
 		ipShard := &p.ipShards[i]
+		var expiredDomains []string
+
 		ipShard.mu.Lock()
-		for ipStr, rec := range ipShard.m {
+		for addr, rec := range ipShard.m {
 			if now.After(rec.ExpiresAt) {
-				delete(ipShard.m, ipStr)
-
-				hIdx := fnv32(rec.Domain) % ShardCount
-				hostShard := &p.hostShards[hIdx]
-				hostShard.mu.Lock()
-				delete(hostShard.m, rec.Domain)
-				hostShard.mu.Unlock()
-
-				p.isDirty.Store(true)
+				delete(ipShard.m, addr)
+				expiredDomains = append(expiredDomains, rec.Domain)
 				count++
 			}
 		}
 		ipShard.mu.Unlock()
+
+		if len(expiredDomains) > 0 {
+			p.hostShards[i].mu.Lock()
+			for _, d := range expiredDomains {
+				delete(p.hostShards[i].m, d)
+			}
+			p.hostShards[i].mu.Unlock()
+		}
 	}
 
 	if count > 0 {
-		zap.S().Debugf("[FakeIP] 清理了 %d 条过期记录", count)
+		p.isDirty.Store(true)
+		zap.S().Debugf("[FakeIP] Cleaned up %d expired records", count)
 	}
 }
 
@@ -262,24 +327,26 @@ func (p *FakeIPPool) saveToFileIfDirty() {
 
 	allRecords := make(map[string]*Record)
 	for i := 0; i < ShardCount; i++ {
-		hostShard := &p.hostShards[i]
-		hostShard.mu.RLock()
-		for k, v := range hostShard.m {
+		p.hostShards[i].mu.RLock()
+		for k, v := range p.hostShards[i].m {
 			allRecords[k] = v
 		}
-		hostShard.mu.RUnlock()
+		p.hostShards[i].mu.RUnlock()
 	}
 
+	Metrics.FakeIPRecordsTotal.Store(int64(len(allRecords)))
+
 	p.cursorMu.Lock()
-	var currentsCopy [][]byte
-	for _, cur := range p.currents {
-		currentsCopy = append(currentsCopy, []byte(cloneIP(cur)))
-	}
+	v4Copy := make([]netip.Addr, len(p.v4Currents))
+	copy(v4Copy, p.v4Currents)
+	v6Copy := make([]netip.Addr, len(p.v6Currents))
+	copy(v6Copy, p.v6Currents)
 	p.cursorMu.Unlock()
 
 	state := PersistState{
-		Currents: currentsCopy,
-		Records:  allRecords,
+		V4Currents: v4Copy,
+		V6Currents: v6Copy,
+		Records:    allRecords,
 	}
 	data, _ := json.MarshalIndent(state, "", "  ")
 	p.isDirty.Store(false)
@@ -287,27 +354,33 @@ func (p *FakeIPPool) saveToFileIfDirty() {
 	tempFile := p.savePath + ".tmp"
 	if err := os.WriteFile(tempFile, data, 0644); err == nil {
 		os.Rename(tempFile, p.savePath)
-		zap.S().Debugf("[FakeIP] 内存数据发生变更，已异步落盘至 %s", p.savePath)
+		zap.S().Debugf("[FakeIP] State changed, flushed to %s", p.savePath)
 	}
 }
 
 func (p *FakeIPPool) loadFromFile() {
 	data, err := os.ReadFile(p.savePath)
 	if err != nil {
-		zap.S().Infof("[FakeIP] 无历史持久化文件，使用全新池")
+		zap.S().Infof("[FakeIP] No persistence file found, initializing new pool")
 		return
 	}
 	var state PersistState
-	if json.Unmarshal(data, &state) != nil {
-		zap.S().Errorf("[FakeIP] 读取历史数据失败，可能文件损坏")
+	if err := json.Unmarshal(data, &state); err != nil {
+		zap.S().Errorf("[FakeIP] Failed to read persistence file: %v", err)
 		return
 	}
 
-	if len(state.Currents) == len(p.ipnets) {
-		for i, curBytes := range state.Currents {
-			recoveredCurrent := net.IP(curBytes)
-			if len(recoveredCurrent) == 16 && p.ipnets[i].Contains(recoveredCurrent) {
-				p.currents[i] = cloneIP(recoveredCurrent)
+	if len(state.V4Currents) == len(p.v4Prefixes) {
+		for i, cur := range state.V4Currents {
+			if cur.IsValid() && p.v4Prefixes[i].Contains(cur) {
+				p.v4Currents[i] = cur.Unmap()
+			}
+		}
+	}
+	if len(state.V6Currents) == len(p.v6Prefixes) {
+		for i, cur := range state.V6Currents {
+			if cur.IsValid() && p.v6Prefixes[i].Contains(cur) {
+				p.v6Currents[i] = cur.Unmap()
 			}
 		}
 	}
@@ -319,17 +392,45 @@ func (p *FakeIPPool) loadFromFile() {
 			continue
 		}
 
+		var validIPs []netip.Addr
+		for _, addr := range rec.IPs {
+			addr = addr.Unmap()
+			inPrefix := false
+			for _, pfx := range p.v4Prefixes {
+				if pfx.Contains(addr) {
+					inPrefix = true
+					break
+				}
+			}
+			if !inPrefix {
+				for _, pfx := range p.v6Prefixes {
+					if pfx.Contains(addr) {
+						inPrefix = true
+						break
+					}
+				}
+			}
+			if inPrefix {
+				validIPs = append(validIPs, addr)
+			}
+		}
+		if len(validIPs) == 0 {
+			continue
+		}
+		rec.IPs = validIPs
+
 		hIdx := fnv32(domain) % ShardCount
 		hostShard := &p.hostShards[hIdx]
 		hostShard.m[domain] = rec
 
-		for _, ipStr := range rec.IPs {
-			ipIdx := fnv32(ipStr) % ShardCount
-			p.ipShards[ipIdx].m[ipStr] = rec
+		for _, addr := range rec.IPs {
+			ipIdx := fnv32Addr(addr) % ShardCount
+			p.ipShards[ipIdx].m[addr] = rec
 		}
 		validCount++
 	}
-	zap.S().Infof("[FakeIP] 成功从 %s 恢复了 %d 条有效记录", p.savePath, validCount)
+	Metrics.FakeIPRecordsTotal.Store(int64(validCount))
+	zap.S().Infof("[FakeIP] Restored %d valid records from %s", validCount, p.savePath)
 }
 
 func (p *FakeIPPool) Close() {
@@ -337,27 +438,64 @@ func (p *FakeIPPool) Close() {
 	p.saveToFileIfDirty()
 }
 
+func (p *FakeIPPool) Clear() {
+	if p == nil {
+		return
+	}
+	for i := 0; i < ShardCount; i++ {
+		p.hostShards[i].mu.Lock()
+		p.hostShards[i].m = make(map[string]*Record)
+		p.hostShards[i].mu.Unlock()
+
+		p.ipShards[i].mu.Lock()
+		p.ipShards[i].m = make(map[netip.Addr]*Record)
+		p.ipShards[i].mu.Unlock()
+	}
+	Metrics.FakeIPRecordsTotal.Store(0)
+	p.isDirty.Store(true)
+	p.saveToFileIfDirty()
+	zap.S().Infof("[FakeIP] Pool records cleared via WebUI control")
+}
+
 func startDNSServer(ctx context.Context, addr string) {
 	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		Metrics.DNSQueriesTotal.Add(1)
 		m := new(dns.Msg)
 		m.SetReply(r)
-		for _, q := range r.Question {
-			if q.Qtype == dns.TypeAAAA {
-				fakeIPs := pool.GetFakeIP(q.Name)
 
-				// 对返回的 FakeIP 数组执行洗牌算法（Shuffle）打散顺序
-				// 由于 GetFakeIP 每次命中都会生成一个全新的切片，因此直接在原数组上无污染打散即可
+		clientIP := w.RemoteAddr().String()
+
+		for _, q := range r.Question {
+			qTypeStr := dns.TypeToString[q.Qtype]
+			switch q.Qtype {
+			case dns.TypeA:
+				fakeIPs := pool.GetFakeIPv4(q.Name)
 				rand.Shuffle(len(fakeIPs), func(i, j int) {
 					fakeIPs[i], fakeIPs[j] = fakeIPs[j], fakeIPs[i]
 				})
+				for _, fakeIP := range fakeIPs {
+					rr, _ := dns.NewRR(fmt.Sprintf("%s A %s", q.Name, fakeIP.String()))
+					if rr != nil {
+						m.Answer = append(m.Answer, rr)
+					}
+				}
+				zap.S().Debugf("[FakeIP DNS] Query from %s: '%s' [%s] -> Answer: %v", clientIP, q.Name, qTypeStr, fakeIPs)
 
-				// 依次打包写入 Answer 队列中传回
+			case dns.TypeAAAA:
+				fakeIPs := pool.GetFakeIPv6(q.Name)
+				rand.Shuffle(len(fakeIPs), func(i, j int) {
+					fakeIPs[i], fakeIPs[j] = fakeIPs[j], fakeIPs[i]
+				})
 				for _, fakeIP := range fakeIPs {
 					rr, _ := dns.NewRR(fmt.Sprintf("%s AAAA %s", q.Name, fakeIP.String()))
 					if rr != nil {
 						m.Answer = append(m.Answer, rr)
 					}
 				}
+				zap.S().Debugf("[FakeIP DNS] Query from %s: '%s' [%s] -> Answer: %v", clientIP, q.Name, qTypeStr, fakeIPs)
+
+			default:
+				zap.S().Debugf("[FakeIP DNS] Query from %s: '%s' [%s] -> Answer: NOERROR (empty)", clientIP, q.Name, qTypeStr)
 			}
 		}
 		w.WriteMsg(m)
@@ -365,24 +503,24 @@ func startDNSServer(ctx context.Context, addr string) {
 
 	udpServer := &dns.Server{Addr: addr, Net: "udp"}
 	tcpServer := &dns.Server{Addr: addr, Net: "tcp"}
-	zap.S().Infof("FakeIP DNS 启动完成 -> [udp://%s] 和 [tcp://%s]", addr, addr)
+	zap.S().Infof("FakeIP DNS server started -> [udp://%s] and [tcp://%s]", addr, addr)
 
 	go func() {
 		<-ctx.Done()
-		zap.S().Infof("[DNS] 正在关闭 FakeIP DNS 服务器...")
+		zap.S().Infof("[DNS] Shutting down FakeIP DNS server...")
 		udpServer.ShutdownContext(context.Background())
 		tcpServer.ShutdownContext(context.Background())
 	}()
 
 	go func() {
 		if err := tcpServer.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-			zap.S().Errorf("TCP DNS 服务器发生致命故障退出: %v", err)
+			zap.S().Errorf("TCP DNS server fatal error: %v", err)
 		}
 	}()
 
 	go func() {
 		if err := udpServer.ListenAndServe(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
-			zap.S().Errorf("UDP DNS 服务器发生致命故障退出: %v", err)
+			zap.S().Errorf("UDP DNS server fatal error: %v", err)
 		}
 	}()
 }

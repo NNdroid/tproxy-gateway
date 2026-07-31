@@ -13,12 +13,14 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
-// dnsCacheEntry 代表一筆 DNS 快取記錄
 type dnsCacheEntry struct {
 	ips       []net.IP
 	expiresAt time.Time
+	staleAt   time.Time
 }
 
 type DefaultResolver struct {
@@ -28,8 +30,9 @@ type DefaultResolver struct {
 	SNI        string
 	cache      sync.Map
 	cacheTTL   time.Duration
-	httpClient *http.Client // 全局复用 HTTP 客户端（长连接保持）
-	dnsClient  *dns.Client  // 全局复用 DNS 客户端
+	httpClient *http.Client
+	dnsClient  *dns.Client
+	sfGroup    singleflight.Group
 }
 
 func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
@@ -42,7 +45,7 @@ func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("无效的 DNS URL: %v", err)
+		return nil, fmt.Errorf("invalid DNS URL: %v", err)
 	}
 
 	host := u.Hostname()
@@ -50,7 +53,7 @@ func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
 
 	if port == "" {
 		switch u.Scheme {
-		case "dot":
+		case "dot", "doq":
 			port = "853"
 		case "doh":
 			port = "443"
@@ -69,10 +72,9 @@ func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
 		HostPort: net.JoinHostPort(host, port),
 		Path:     path,
 		SNI:      u.Query().Get("sni"),
-		cacheTTL: 5 * time.Minute, // 預設快取 5 分鐘
+		cacheTTL: 5 * time.Minute,
 	}
 
-	// 提前实例化复用客户端，避免每次查询触发三次握手和 TLS 握手
 	if resolver.Scheme == "doh" {
 		resolver.httpClient = &http.Client{
 			Transport: &http.Transport{
@@ -83,39 +85,73 @@ func NewDefaultResolver(rawURL string) (*DefaultResolver, error) {
 			},
 			Timeout: 5 * time.Second,
 		}
-	} else if resolver.Scheme == "dot" || resolver.Scheme == "tcp" || resolver.Scheme == "udp" {
+	} else if resolver.Scheme == "dot" || resolver.Scheme == "tcp" || resolver.Scheme == "udp" || resolver.Scheme == "doq" {
 		resolver.dnsClient = &dns.Client{
 			Net:     resolver.Scheme,
 			Timeout: 5 * time.Second,
 		}
-		if resolver.Scheme == "dot" {
+		if resolver.Scheme == "dot" || resolver.Scheme == "doq" {
 			resolver.dnsClient.Net = "tcp-tls"
 			resolver.dnsClient.TLSConfig = &tls.Config{ServerName: resolver.SNI}
 		}
 	}
 
-	// 啟動背景定期清理過期快取 (每分鐘清理一次)
 	go resolver.startCacheCleaner()
 	return resolver, nil
 }
 
-// LookupIP 获取域名的真实 IP (并发支持 A 和 AAAA 记录，并包含快取)
 func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
-	// 1. 如果是纯 IP，直接返回
 	if ip := net.ParseIP(domain); ip != nil {
 		return []net.IP{ip}, nil
 	}
 
-	// 2. 检查快取
-	if v, ok := r.cache.Load(domain); ok {
-		entry := v.(dnsCacheEntry)
-		if time.Now().Before(entry.expiresAt) {
-			return entry.ips, nil // 快取命中且有效
-		}
-		// 快取过期，继续往下执行进行真实解析
+	if globalAdBlocker != nil && globalAdBlocker.IsBlocked(domain) {
+		zap.S().Debugf("[DNS] Domain '%s' blocked by AdBlock filter", domain)
+		return nil, fmt.Errorf("domain blocked by AdBlock filter: %s", domain)
 	}
 
-	// 3. 封装通用的 DNS 内部查询闭包
+	now := time.Now()
+
+	if v, ok := r.cache.Load(domain); ok {
+		entry := v.(dnsCacheEntry)
+		if now.Before(entry.expiresAt) {
+			zap.S().Debugf("[DNS] Fresh cache hit for '%s' -> %v", domain, entry.ips)
+			return entry.ips, nil
+		}
+		if now.Before(entry.staleAt) {
+			zap.S().Debugf("[DNS] SWR cache hit for '%s' -> %v (stale, refreshing in background)", domain, entry.ips)
+			go func(d string) {
+				_, _, _ = r.singleflightLookup(d)
+			}(domain)
+			return entry.ips, nil
+		}
+	}
+
+	zap.S().Debugf("[DNS] Cache miss for '%s', querying upstream [%s://%s]...", domain, r.Scheme, r.HostPort)
+	ips, _, err := r.singleflightLookup(domain)
+	return ips, err
+}
+
+func (r *DefaultResolver) singleflightLookup(domain string) ([]net.IP, time.Duration, error) {
+	res, err, shared := r.sfGroup.Do(domain, func() (interface{}, error) {
+		return r.rawQueryDNS(domain)
+	})
+
+	if shared {
+		zap.S().Debugf("[DNS] SingleFlight coalesced concurrent query for '%s'", domain)
+	}
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ips := res.([]net.IP)
+	dup := make([]net.IP, len(ips))
+	copy(dup, ips)
+	return dup, r.cacheTTL, nil
+}
+
+func (r *DefaultResolver) rawQueryDNS(domain string) ([]net.IP, error) {
 	queryDNS := func(qType uint16) ([]net.IP, uint32, error) {
 		m := new(dns.Msg)
 		m.SetQuestion(dns.Fqdn(domain), qType)
@@ -125,12 +161,18 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 		var err error
 
 		switch r.Scheme {
-		case "udp", "tcp", "dot":
+		case "udp", "tcp", "dot", "doq":
 			in, _, err = r.dnsClient.Exchange(m, r.HostPort)
 		case "doh":
 			in, err = r.exchangeDoH(m)
 		default:
-			return nil, 300, fmt.Errorf("不支持的 DNS 协议: %s", r.Scheme)
+			return nil, 300, fmt.Errorf("unsupported DNS protocol: %s", r.Scheme)
+		}
+
+		if err != nil {
+			zap.S().Warnf("[DNS] Upstream DNS [%s://%s] failed for '%s': %v, falling back to UDP 223.5.5.5:53", r.Scheme, r.HostPort, domain, err)
+			fallbackClient := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+			in, _, err = fallbackClient.Exchange(m, "223.5.5.5:53")
 		}
 
 		if err != nil {
@@ -159,7 +201,6 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 		return ips, minTTL, nil
 	}
 
-	// 4. 并发发起 A 和 AAAA 查询，最大限度降低延迟
 	var wg sync.WaitGroup
 	var ipsV4, ipsV6 []net.IP
 	var ttlV4, ttlV6 uint32 = 300, 300
@@ -176,7 +217,6 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 	}()
 	wg.Wait()
 
-	// 5. 合并查询结果 (优先保留 IPv6，符合 Happy Eyeballs 精神)
 	var allIPs []net.IP
 	if len(ipsV6) > 0 {
 		allIPs = append(allIPs, ipsV6...)
@@ -185,22 +225,18 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 		allIPs = append(allIPs, ipsV4...)
 	}
 
-	// 如果全部失败且报错
 	if len(allIPs) == 0 {
 		if errV4 != nil && errV6 != nil {
-			return nil, fmt.Errorf("A 和 AAAA 查询均失败, IPv4Err: %v, IPv6Err: %v", errV4, errV6)
+			return nil, fmt.Errorf("both A and AAAA queries failed, IPv4Err: %v, IPv6Err: %v", errV4, errV6)
 		}
-		return nil, fmt.Errorf("无 A 或 AAAA 记录返回")
+		return nil, fmt.Errorf("no A or AAAA records returned")
 	}
 
-	// 6. 计算双端记录中的最小 TTL，确保缓存不过期出错
 	minTTL := ttlV4
 	if len(ipsV6) > 0 && ttlV6 < minTTL {
 		minTTL = ttlV6
 	}
 
-	// 7. 写入快取
-	// TTL 限制：最少 1 分钟，最多不超过设定的 r.cacheTTL (例如 5 分钟)
 	ttl := time.Duration(minTTL) * time.Second
 	if ttl < time.Minute {
 		ttl = time.Minute
@@ -209,27 +245,34 @@ func (r *DefaultResolver) LookupIP(domain string) ([]net.IP, error) {
 		ttl = r.cacheTTL
 	}
 
+	now := time.Now()
 	r.cache.Store(domain, dnsCacheEntry{
 		ips:       allIPs,
-		expiresAt: time.Now().Add(ttl),
+		expiresAt: now.Add(ttl),
+		staleAt:   now.Add(ttl + 10*time.Minute),
 	})
 
+	zap.S().Debugf("[DNS] Raw query '%s' success -> IPs: %v (TTL: %v)", domain, allIPs, ttl)
 	return allIPs, nil
 }
 
-// startCacheCleaner 背景清理過期快取
 func (r *DefaultResolver) startCacheCleaner() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
+		count := 0
 		r.cache.Range(func(key, value interface{}) bool {
 			entry := value.(dnsCacheEntry)
-			if now.After(entry.expiresAt) {
+			if now.After(entry.staleAt) {
 				r.cache.Delete(key)
+				count++
 			}
-			return true // 繼續遍歷
+			return true
 		})
+		if count > 0 {
+			zap.S().Debugf("[DNS] Cleaned up %d stale DNS cache entries", count)
+		}
 	}
 }
 
@@ -259,7 +302,7 @@ func (r *DefaultResolver) exchangeDoH(m *dns.Msg) (*dns.Msg, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("DoH 请求失败, HTTP 状态码: %d", resp.StatusCode)
+		return nil, fmt.Errorf("DoH request failed, HTTP status code: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -273,4 +316,32 @@ func (r *DefaultResolver) exchangeDoH(m *dns.Msg) (*dns.Msg, error) {
 	}
 
 	return out, nil
+}
+
+func (r *DefaultResolver) ClearCache() {
+	if r == nil {
+		return
+	}
+	r.cache.Range(func(key, value interface{}) bool {
+		r.cache.Delete(key)
+		return true
+	})
+	zap.S().Infof("[DNS] Cache cleared via WebUI control")
+}
+
+func (r *DefaultResolver) CacheCount() int {
+	if r == nil {
+		return 0
+	}
+	count := 0
+	now := time.Now()
+	r.cache.Range(func(key, value interface{}) bool {
+		if entry, ok := value.(dnsCacheEntry); ok {
+			if now.Before(entry.staleAt) {
+				count++
+			}
+		}
+		return true
+	})
+	return count
 }

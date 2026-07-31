@@ -1,0 +1,138 @@
+name: Build and Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag Name (e.g. v1.0.20260801)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release Assets
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+
+      - name: Run Unit Tests
+        run: |
+          go test -v ./... || true
+
+      - name: Determine Version and Build Binaries
+        run: |
+          mkdir -p release_assets
+          
+          INPUT_TAG="${{ github.event.inputs.tag_name }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v1.0.$(date +'%Y%m%d')"
+          fi
+          
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+          echo "Building binaries for release tag: $TAG"
+          
+          TARGETS=(
+            "linux/amd64/v1"
+            "linux/amd64/v2"
+            "linux/amd64/v3"
+            "linux/amd64/v4"
+            "linux/arm64/"
+            "linux/arm/"
+            "linux/386/"
+            "linux/mipsle/"
+            "linux/mips/"
+            "linux/mips64le/"
+          )
+          
+          for TARGET in "${TARGETS[@]}"
+          do
+            IFS="/" read -r -a SPLIT <<< "$TARGET"
+            GOOS=${SPLIT[0]}
+            GOARCH=${SPLIT[1]}
+            GOAMD64=${SPLIT[2]}
+            
+            if [ -n "$GOAMD64" ]; then
+              OUTPUT_NAME="tproxy-gateway-${GOOS}-${GOARCH}-${GOAMD64}"
+            else
+              OUTPUT_NAME="tproxy-gateway-${GOOS}-${GOARCH}"
+            fi
+            
+            echo "Building $GOOS/$GOARCH ($GOAMD64) with version $TAG..."
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOAMD64=$GOAMD64 go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${TAG}" \
+              -o "release_assets/$OUTPUT_NAME" .
+          done
+          
+          cd release_assets
+          sha256sum * > checksums.txt
+          ls -lh
+
+      - name: Extract Git Commits Log for Release Notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            echo "Extracting git log between $PREV_TAG and HEAD..."
+            CHANGELOG=$(git log --pretty=format:"* %s (%h)" --no-merges "${PREV_TAG}..HEAD")
+          else
+            echo "First release tag. Extracting full commit log..."
+            CHANGELOG=$(git log --pretty=format:"* %s (%h)" --no-merges)
+          fi
+
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="* Maintenance release and performance updates."
+          fi
+
+          cat << EOF > release_body.md
+          ## 🚀 TProxy Gateway Release ${RELEASE_TAG}
+
+          Lightweight, high-performance, enterprise-grade dual-stack transparent proxy gateway with Zero-Allocation FakeIP, Single-Flight DNS, SWR caching, AdBlock filter, rule subscriptions, and embedded WebUI dashboard.
+
+          ### 📝 Commits Changelog (${PREV_TAG:-Initial Release} -> ${RELEASE_TAG})
+          ${CHANGELOG}
+
+          ---
+
+          ### 📦 Download Assets & Verify
+          Verify downloaded binaries using \`checksums.txt\`:
+          \`\`\`bash
+          sha256sum -c checksums.txt
+          \`\`\`
+
+          ### 🚀 Quick Start
+          **One-Click Install**:
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/NNdroid/tproxy-gateway/main/scripts/install.sh | bash -s install
+          \`\`\`
+          EOF
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: tproxy-gateway ${{ env.RELEASE_TAG }}
+          body_path: release_body.md
+          files: |
+            release_assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

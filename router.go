@@ -42,19 +42,30 @@ func (r *DomainRouter) AddRule(domain string, upstream string, rewrite map[strin
 	node.HeaderRewrite = rewrite
 }
 
+// MatchNode 采用零堆分配的从右向左索引切分匹配算法
 func (r *DomainRouter) MatchNode(domain string) *TrieNode {
 	domain = strings.TrimSuffix(domain, ".")
-	node := r.root
+	if domain == "" {
+		return nil
+	}
 
+	node := r.root
 	var lastMatchedNode *TrieNode
 	if node.Upstream != "" {
 		lastMatchedNode = node
 	}
 
-	rest := domain
-	for rest != "" {
+	end := len(domain)
+	for end > 0 {
+		start := strings.LastIndexByte(domain[:end], '.')
 		var part string
-		part, rest = popLastDomainPart(rest)
+		if start == -1 {
+			part = domain[:end]
+			end = 0
+		} else {
+			part = domain[start+1 : end]
+			end = start
+		}
 
 		child, ok := node.children[part]
 		if !ok {
@@ -65,14 +76,6 @@ func (r *DomainRouter) MatchNode(domain string) *TrieNode {
 			lastMatchedNode = node
 		}
 	}
-	return lastMatchedNode
-}
 
-// 获取域名的最后一段和剩余部分。例如输入 "www.google.com"，返回 "com" 和 "www.google"
-func popLastDomainPart(domain string) (part, rest string) {
-	idx := strings.LastIndexByte(domain, '.')
-	if idx == -1 {
-		return domain, "" // 已经是最后一部分了
-	}
-	return domain[idx+1:], domain[:idx]
+	return lastMatchedNode
 }
