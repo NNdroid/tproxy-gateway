@@ -26,6 +26,8 @@ A lightweight, high-performance, enterprise-grade dual-stack transparent proxy g
   * **Prometheus Metrics**: Exposes `/metrics` endpoint and `/api/state` REST JSON API.
 * **🔌 SOCKS5 & HTTP Inbound Proxies**:
   Provides optional SOCKS5 (`:1080`) and HTTP (`:8080`) proxy listeners for non-TProxy devices on the local network.
+* **🤖 MCP Server on the WebUI Port**:
+  Streamable HTTP at `/mcp`, with 16 tools, 7 resources and 2 diagnostic prompts. Configure independent Bearer, API Key, Basic, inherited WebUI credentials or anonymous access in the dashboard; management tools require `mcp.allow_writes`. See [MCP setup and capabilities](docs/mcp-server.md).
 * **📦 Automated Policy Routing (AutoRoute)**:
   Automatically constructs and manages Linux IPv4/IPv6 `ip rule/route` and `nftables` policy chains, leaving zero residue on exit.
 

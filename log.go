@@ -20,6 +20,7 @@ type LogRingBuffer struct {
 	mu      sync.RWMutex
 	entries []LogEntry
 	maxSize int
+	next    int
 }
 
 var (
@@ -36,18 +37,23 @@ func init() {
 }
 
 func (b *LogRingBuffer) Push(level, msg string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	entry := LogEntry{
 		Timestamp: time.Now().Format("15:04:05.000"),
 		Level:     level,
 		Message:   msg,
 	}
-	if len(b.entries) >= b.maxSize {
-		b.entries = b.entries[1:]
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.maxSize <= 0 {
+		return
 	}
-	b.entries = append(b.entries, entry)
+	if len(b.entries) < b.maxSize {
+		b.entries = append(b.entries, entry)
+		return
+	}
+	b.entries[b.next] = entry
+	b.next = (b.next + 1) % b.maxSize
 }
 
 func (b *LogRingBuffer) GetEntries(limit int) []LogEntry {
@@ -59,7 +65,12 @@ func (b *LogRingBuffer) GetEntries(limit int) []LogEntry {
 	}
 
 	result := make([]LogEntry, limit)
-	copy(result, b.entries[len(b.entries)-limit:])
+	if limit == 0 {
+		return result
+	}
+	start := (b.next + len(b.entries) - limit) % len(b.entries)
+	n := copy(result, b.entries[start:])
+	copy(result[n:], b.entries[:limit-n])
 	return result
 }
 

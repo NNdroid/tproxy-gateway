@@ -28,12 +28,12 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           check-latest: true
 
       - name: Run Unit Tests
         run: |
-          go test -v ./... || true
+          go test -count=1 -timeout=120s -v ./...
 
       - name: Determine Version and Build Binaries
         run: |

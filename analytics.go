@@ -35,8 +35,11 @@ type AnalyticsData struct {
 
 type AnalyticsStore struct {
 	mu         sync.RWMutex
+	saveMu     sync.Mutex
 	topDomains map[string]int64
 	hourly     map[string]*HourlyStat
+	hourID     int64
+	hourStat   *HourlyStat
 	savePath   string
 	isDirty    atomic.Bool
 }
@@ -67,17 +70,12 @@ func (as *AnalyticsStore) RecordDNSQuery(domain string) {
 	}
 	cleanDomain := strings.ToLower(strings.TrimSuffix(domain, "."))
 
-	nowKey := time.Now().Format("2006-01-02 15:00")
+	now := time.Now()
 
 	as.mu.Lock()
 	as.topDomains[cleanDomain]++
 
-	stat, exists := as.hourly[nowKey]
-	if !exists {
-		stat = &HourlyStat{Timestamp: nowKey}
-		as.hourly[nowKey] = stat
-		as.pruneOldBucketsLocked()
-	}
+	stat := as.currentBucketLocked(now)
 	stat.DNSCount++
 	as.mu.Unlock()
 
@@ -88,15 +86,10 @@ func (as *AnalyticsStore) RecordTCPConn(domain string) {
 	if as == nil {
 		return
 	}
-	nowKey := time.Now().Format("2006-01-02 15:00")
+	now := time.Now()
 
 	as.mu.Lock()
-	stat, exists := as.hourly[nowKey]
-	if !exists {
-		stat = &HourlyStat{Timestamp: nowKey}
-		as.hourly[nowKey] = stat
-		as.pruneOldBucketsLocked()
-	}
+	stat := as.currentBucketLocked(now)
 	stat.TCPCount++
 	as.mu.Unlock()
 
@@ -107,19 +100,33 @@ func (as *AnalyticsStore) RecordUDPConn(domain string) {
 	if as == nil {
 		return
 	}
-	nowKey := time.Now().Format("2006-01-02 15:00")
+	now := time.Now()
 
 	as.mu.Lock()
-	stat, exists := as.hourly[nowKey]
-	if !exists {
-		stat = &HourlyStat{Timestamp: nowKey}
-		as.hourly[nowKey] = stat
-		as.pruneOldBucketsLocked()
-	}
+	stat := as.currentBucketLocked(now)
 	stat.UDPCount++
 	as.mu.Unlock()
 
 	as.isDirty.Store(true)
+}
+
+// Cache the formatted hour on the write path, including the local UTC offset.
+// Callers hold mu; Clear invalidates the cached bucket.
+func (as *AnalyticsStore) currentBucketLocked(now time.Time) *HourlyStat {
+	_, offset := now.Zone()
+	hourID := (now.Unix() + int64(offset)) / 3600
+	if as.hourStat != nil && as.hourID == hourID {
+		return as.hourStat
+	}
+	key := now.Format("2006-01-02 15:00")
+	stat := as.hourly[key]
+	if stat == nil {
+		stat = &HourlyStat{Timestamp: key}
+		as.hourly[key] = stat
+		as.pruneOldBucketsLocked()
+	}
+	as.hourID, as.hourStat = hourID, stat
+	return stat
 }
 
 func (as *AnalyticsStore) pruneOldBucketsLocked() {
@@ -145,34 +152,70 @@ func (as *AnalyticsStore) GetSummary(topN int) (top []DomainStat, trend []Hourly
 	}
 
 	as.mu.RLock()
-	defer as.mu.RUnlock()
-
-	// 1. Sort Top Domains
-	domainList := make([]DomainStat, 0, len(as.topDomains))
+	if topN < 0 {
+		topN = 0
+	}
+	if topN > len(as.topDomains) {
+		topN = len(as.topDomains)
+	}
+	// Keep only N candidates in a min-heap, with the worst candidate at the root.
+	domainList := make([]DomainStat, 0, topN)
 	for d, c := range as.topDomains {
-		domainList = append(domainList, DomainStat{Domain: d, Count: c})
+		if topN == 0 {
+			break
+		}
+		item := DomainStat{Domain: d, Count: c}
+		if len(domainList) < topN {
+			domainList = append(domainList, item)
+			for child := len(domainList) - 1; child > 0; {
+				parent := (child - 1) / 2
+				if !domainRanksBefore(domainList[parent], domainList[child]) {
+					break
+				}
+				domainList[parent], domainList[child] = domainList[child], domainList[parent]
+				child = parent
+			}
+		} else if domainRanksBefore(item, domainList[0]) {
+			domainList[0] = item
+			for parent := 0; ; {
+				child := 2*parent + 1
+				if child >= len(domainList) {
+					break
+				}
+				if child+1 < len(domainList) && domainRanksBefore(domainList[child], domainList[child+1]) {
+					child++
+				}
+				if !domainRanksBefore(domainList[parent], domainList[child]) {
+					break
+				}
+				domainList[parent], domainList[child] = domainList[child], domainList[parent]
+				parent = child
+			}
+		}
 	}
-
-	sort.Slice(domainList, func(i, j int) bool {
-		return domainList[i].Count > domainList[j].Count
-	})
-
-	if len(domainList) > topN {
-		domainList = domainList[:topN]
-	}
-	top = domainList
 
 	// 2. Sort Hourly Trend
 	trendList := make([]HourlyStat, 0, len(as.hourly))
 	for _, stat := range as.hourly {
 		trendList = append(trendList, *stat)
 	}
+	as.mu.RUnlock()
+	sort.Slice(domainList, func(i, j int) bool {
+		return domainRanksBefore(domainList[i], domainList[j])
+	})
 
 	sort.Slice(trendList, func(i, j int) bool {
 		return trendList[i].Timestamp < trendList[j].Timestamp
 	})
 
-	return top, trendList
+	return domainList, trendList
+}
+
+func domainRanksBefore(a, b DomainStat) bool {
+	if a.Count != b.Count {
+		return a.Count > b.Count
+	}
+	return a.Domain < b.Domain
 }
 
 func (as *AnalyticsStore) Clear() {
@@ -182,6 +225,7 @@ func (as *AnalyticsStore) Clear() {
 	as.mu.Lock()
 	as.topDomains = make(map[string]int64)
 	as.hourly = make(map[string]*HourlyStat)
+	as.hourStat = nil
 	as.mu.Unlock()
 	as.isDirty.Store(true)
 	as.saveToFileIfDirty()
@@ -204,26 +248,39 @@ func (as *AnalyticsStore) startBackgroundTasks(ctx context.Context) {
 }
 
 func (as *AnalyticsStore) saveToFileIfDirty() {
-	if !as.isDirty.Load() {
+	as.saveMu.Lock()
+	defer as.saveMu.Unlock()
+	if !as.isDirty.Swap(false) {
 		return
 	}
 
 	as.mu.RLock()
 	data := AnalyticsData{
-		TopDomains: as.topDomains,
-		Hourly:     as.hourly,
+		TopDomains: make(map[string]int64, len(as.topDomains)),
+		Hourly:     make(map[string]*HourlyStat, len(as.hourly)),
 	}
-	encoded, err := json.MarshalIndent(data, "", "  ")
+	for domain, count := range as.topDomains {
+		data.TopDomains[domain] = count
+	}
+	for key, stat := range as.hourly {
+		clone := *stat
+		data.Hourly[key] = &clone
+	}
 	as.mu.RUnlock()
+	encoded, err := json.MarshalIndent(data, "", "  ")
 
 	if err != nil {
+		as.isDirty.Store(true)
 		return
 	}
 
-	as.isDirty.Store(false)
 	tempFile := as.savePath + ".tmp"
-	if err := os.WriteFile(tempFile, encoded, 0644); err == nil {
-		os.Rename(tempFile, as.savePath)
+	if err := os.WriteFile(tempFile, encoded, 0644); err != nil {
+		as.isDirty.Store(true)
+		return
+	}
+	if err := os.Rename(tempFile, as.savePath); err != nil {
+		as.isDirty.Store(true)
 	}
 }
 

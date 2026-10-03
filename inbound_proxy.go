@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -84,7 +83,7 @@ func handleHTTPInboundConn(clientConn net.Conn) {
 			port = "80"
 		}
 	}
-	targetAddrStr := fmt.Sprintf("%s:%s", host, port)
+	targetAddrStr := net.JoinHostPort(host, port)
 
 	upstreamProxy, rewrites := globalRuleEngine.Match(host, netip.Addr{})
 	upstreamProxy = globalChecker.SelectProxy(upstreamProxy)

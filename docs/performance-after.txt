@@ -1,0 +1,21 @@
+goos: windows
+goarch: amd64
+pkg: tproxy-gateway
+cpu: 13th Gen Intel(R) Core(TM) i9-13900K
+BenchmarkAnalyticsSummary/1000-32         	  115533	      9781 ns/op	     600 B/op	       5 allocs/op
+BenchmarkAnalyticsSummary/1000-32         	  125930	      9725 ns/op	     600 B/op	       5 allocs/op
+BenchmarkAnalyticsSummary/1000-32         	  122230	     10028 ns/op	     600 B/op	       5 allocs/op
+BenchmarkAnalyticsSummary/100000-32       	    1914	    624040 ns/op	     600 B/op	       5 allocs/op
+BenchmarkAnalyticsSummary/100000-32       	    1942	    608052 ns/op	     600 B/op	       5 allocs/op
+BenchmarkAnalyticsSummary/100000-32       	    1990	    603001 ns/op	     600 B/op	       5 allocs/op
+BenchmarkRecordDNSQuery-32                	28542409	        47.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRecordDNSQuery-32                	16986940	        72.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRecordDNSQuery-32                	16061031	        72.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLogPush-32                       	 7606581	       159.2 ns/op	      16 B/op	       1 allocs/op
+BenchmarkLogPush-32                       	 7705495	       156.5 ns/op	      16 B/op	       1 allocs/op
+BenchmarkLogPush-32                       	 7556712	       158.8 ns/op	      16 B/op	       1 allocs/op
+BenchmarkAdBlockLookup-32                 	255443011	         4.183 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAdBlockLookup-32                 	279220090	         4.223 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAdBlockLookup-32                 	282491727	         4.216 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	tproxy-gateway	19.427s

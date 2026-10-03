@@ -94,6 +94,7 @@ func main() {
 
 				InitLogger(newCfg.Log.Level)
 				cfg = newCfg
+				publishMCPPolicy(newCfg)
 
 				zap.S().Infof("🎉 [HotReload] Configuration reloaded successfully! (log level: %s)", strings.ToUpper(cfg.Log.Level))
 			}

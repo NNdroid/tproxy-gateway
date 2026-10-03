@@ -92,6 +92,8 @@ func registerStateRoutes(mux *http.ServeMux) {
 			"ui_domain":               uiDomain,
 			"ui_mode":                 uiMode,
 			"log_level":               logLevel,
+			"mcp_enabled":             currentMCPPolicy().Config.Enabled,
+			"mcp_allow_writes":        currentMCPPolicy().Config.AllowWrites,
 		}
 		json.NewEncoder(w).Encode(state)
 	})
@@ -132,8 +134,10 @@ func registerMetricsRoutes(mux *http.ServeMux) {
 }
 
 func startMetricsServer(ctx context.Context, mCfg MetricsConfig, uiCfg UIConfig) {
-	if !mCfg.Enabled {
-		zap.S().Infof("[Metrics] Prometheus metrics service disabled (metrics.enabled: false)")
+	mcpEnabled := cfg != nil && cfg.MCP.Enabled
+	address, enabled := managementListenAddress(mCfg, uiCfg, mcpEnabled)
+	if !enabled {
+		zap.S().Infof("[HTTP] Physical management listener disabled; virtual-domain routing remains available")
 		return
 	}
 
@@ -143,16 +147,22 @@ func startMetricsServer(ctx context.Context, mCfg MetricsConfig, uiCfg UIConfig)
 	mux := globalWebUIMux
 
 	srv := &http.Server{
-		Addr:    mCfg.Addr,
-		Handler: mux,
+		Addr: address, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 * 1024,
 	}
 
-	zap.S().Infof("📊 Prometheus Metrics & REST API started -> http://%s/metrics", mCfg.Addr)
+	zap.S().Infof("[HTTP] Shared WebUI, REST, metrics and MCP listener -> http://%s", address)
 
 	go func() {
 		<-ctx.Done()
 		zap.S().Infof("[Metrics] Shutting down Metrics server...")
-		srv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+		}
 	}()
 
 	go func() {
@@ -243,6 +253,7 @@ func registerConfigRoutes(mux *http.ServeMux) {
 			NewAdBlocker(newCfg.AdBlock)
 			NewSubscriptionManager(newCfg.Subscriptions)
 			cfg = newCfg
+			publishMCPPolicy(newCfg)
 
 			zap.S().Infof("🎉 Configuration saved and hot-reloaded successfully via WebUI!")
 			json.NewEncoder(w).Encode(map[string]string{

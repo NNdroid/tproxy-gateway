@@ -4,621 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TProxy Gateway - Management & Control Dashboard</title>
-    <style>
-        :root {
-            --bg-color: #0b0f19;
-            --glass-bg: rgba(22, 32, 54, 0.45);
-            --glass-border: rgba(255, 255, 255, 0.12);
-            --glass-shine: rgba(255, 255, 255, 0.08);
-            --accent-cyan: #38bdf8;
-            --accent-indigo: #818cf8;
-            --accent-purple: #c084fc;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --success-glow: rgba(74, 222, 128, 0.4);
-            --success-color: #4ade80;
-            --error-color: #f87171;
-            --warning-color: #fbbf24;
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            min-height: 100vh;
-            overflow-x: hidden;
-            position: relative;
-        }
-
-        /* Ambient Liquid Lighting Blobs */
-        .ambient-bg {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            z-index: -1;
-            overflow: hidden;
-            pointer-events: none;
-        }
-
-        .blob {
-            position: absolute;
-            border-radius: 50%;
-            filter: blur(90px);
-            opacity: 0.35;
-            animation: float 18s ease-in-out infinite alternate;
-        }
-
-        .blob-1 {
-            width: 450px;
-            height: 450px;
-            background: linear-gradient(135deg, #0284c7, #6366f1);
-            top: -100px;
-            left: -100px;
-        }
-
-        .blob-2 {
-            width: 500px;
-            height: 500px;
-            background: linear-gradient(135deg, #8b5cf6, #ec4899);
-            bottom: -150px;
-            right: -100px;
-            animation-delay: -9s;
-        }
-
-        .blob-3 {
-            width: 350px;
-            height: 350px;
-            background: linear-gradient(135deg, #06b6d4, #10b981);
-            top: 40%;
-            left: 35%;
-            animation-delay: -5s;
-        }
-
-        @keyframes float {
-            0% { transform: translate(0, 0) scale(1); }
-            50% { transform: translate(60px, 40px) scale(1.1); }
-            100% { transform: translate(-40px, 80px) scale(0.95); }
-        }
-
-        /* iOS Liquid Glass Card Base */
-        .glass-panel {
-            background: var(--glass-bg);
-            backdrop-filter: blur(24px) saturate(190%);
-            -webkit-backdrop-filter: blur(24px) saturate(190%);
-            border: 1px solid var(--glass-border);
-            border-radius: 24px;
-            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.35), inset 0 1px 0 0 var(--glass-shine);
-            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease, border-color 0.3s ease;
-        }
-
-        .glass-panel:hover {
-            transform: translateY(-2px);
-            border-color: rgba(255, 255, 255, 0.22);
-            box-shadow: 0 20px 50px 0 rgba(0, 0, 0, 0.45), inset 0 1px 0 0 rgba(255, 255, 255, 0.25);
-        }
-
-        /* Login Modal & Glass Overlay */
-        .login-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background: rgba(11, 15, 25, 0.85);
-            backdrop-filter: blur(30px);
-            -webkit-backdrop-filter: blur(30px);
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 1.5rem;
-        }
-
-        .login-card {
-            width: 100%;
-            max-width: 420px;
-            padding: 2.5rem 2rem;
-            text-align: center;
-        }
-
-        .login-input {
-            width: 100%;
-            padding: 0.85rem 1.25rem;
-            border-radius: 14px;
-            background: rgba(15, 23, 42, 0.7);
-            border: 1px solid var(--glass-border);
-            color: #fff;
-            font-size: 1rem;
-            margin: 1.25rem 0 1.5rem;
-            outline: none;
-            transition: all 0.3s ease;
-        }
-
-        .login-input:focus {
-            border-color: var(--accent-cyan);
-            box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
-        }
-
-        /* Navbar Header */
-        .navbar {
-            max-width: 1200px;
-            margin: 1.5rem auto 0;
-            padding: 1.25rem 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
-
-        .brand-logo {
-            width: 40px;
-            height: 40px;
-            border-radius: 12px;
-            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.25rem;
-            box-shadow: 0 4px 15px rgba(56, 189, 248, 0.4);
-        }
-
-        .brand-title {
-            font-size: 1.35rem;
-            font-weight: 700;
-            letter-spacing: -0.02em;
-            background: linear-gradient(135deg, #ffffff, #cbd5e1);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin: 0;
-        }
-
-        .status-pill {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.5rem 1rem;
-            border-radius: 30px;
-            background: rgba(74, 222, 128, 0.12);
-            border: 1px solid rgba(74, 222, 128, 0.25);
-            color: var(--success-color);
-            font-size: 0.85rem;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-            transition: all 0.3s ease;
-        }
-
-        .pulse-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--success-color);
-            box-shadow: 0 0 10px var(--success-glow);
-            animation: pulse 2s ease-in-out infinite;
-            transition: all 0.3s ease;
-        }
-
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.4); opacity: 0.6; }
-        }
-
-        /* Container Layout */
-        .container {
-            max-width: 1200px;
-            margin: 2rem auto 3rem;
-            padding: 0 1.5rem;
-        }
-
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        .stat-card {
-            padding: 1.75rem 1.5rem;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .stat-card::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            right: 0;
-            width: 100px;
-            height: 100px;
-            background: radial-gradient(circle, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0) 70%);
-            border-radius: 50%;
-            pointer-events: none;
-        }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .card-title {
-            color: var(--text-muted);
-            font-size: 0.9rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .card-icon {
-            font-size: 1.2rem;
-            opacity: 0.8;
-        }
-
-        .card-value {
-            font-size: 2.25rem;
-            font-weight: 800;
-            margin: 1rem 0 0.5rem;
-            background: linear-gradient(135deg, #ffffff 30%, var(--accent-cyan));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: -0.03em;
-        }
-
-        .card-footer {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-            display: flex;
-            align-items: center;
-            gap: 0.35rem;
-        }
-
-        /* Section Panel */
-        .section-panel {
-            padding: 2rem;
-            margin-bottom: 2rem;
-        }
-
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-        }
-
-        .section-title {
-            font-size: 1.2rem;
-            font-weight: 700;
-            margin: 0;
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-        }
-
-        /* Quick Control Panel Buttons */
-        .control-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-        }
-
-        .btn-action {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 0.5rem;
-            padding: 0.85rem 1.25rem;
-            border-radius: 16px;
-            font-size: 0.9rem;
-            font-weight: 600;
-            cursor: pointer;
-            border: 1px solid var(--glass-border);
-            transition: all 0.25s ease;
-            outline: none;
-        }
-
-        .btn-secondary {
-            background: rgba(30, 41, 59, 0.6);
-            color: var(--text-main);
-        }
-
-        .btn-secondary:hover {
-            background: rgba(51, 65, 85, 0.8);
-            border-color: rgba(255, 255, 255, 0.25);
-            transform: translateY(-2px);
-        }
-
-        .btn-primary {
-            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
-            color: #0f172a;
-            border: none;
-            box-shadow: 0 4px 15px rgba(56, 189, 248, 0.35);
-        }
-
-        .btn-primary:hover {
-            opacity: 0.95;
-            box-shadow: 0 6px 20px rgba(56, 189, 248, 0.5);
-            transform: translateY(-2px);
-        }
-
-        .btn-danger {
-            background: rgba(239, 68, 68, 0.15);
-            color: var(--error-color);
-            border-color: rgba(239, 68, 68, 0.3);
-        }
-
-        .btn-danger:hover {
-            background: rgba(239, 68, 68, 0.3);
-            border-color: rgba(239, 68, 68, 0.5);
-            transform: translateY(-2px);
-        }
-
-        /* 30-Day Trend Chart & Top Domains Split */
-        .analytics-split {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
-
-        @media (max-width: 900px) {
-            .analytics-split {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .chart-header-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-
-        .filter-btn {
-            background: rgba(30, 41, 59, 0.5);
-            border: 1px solid var(--glass-border);
-            color: var(--text-muted);
-            padding: 0.35rem 0.75rem;
-            border-radius: 12px;
-            font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-
-        .filter-btn.active, .filter-btn:hover {
-            background: rgba(56, 189, 248, 0.2);
-            color: var(--accent-cyan);
-            border-color: rgba(56, 189, 248, 0.4);
-        }
-
-        /* SVG Bar Chart Styling */
-        .chart-container {
-            width: 100%;
-            height: 240px;
-            margin-top: 1rem;
-            position: relative;
-        }
-
-        .chart-svg {
-            width: 100%;
-            height: 100%;
-            overflow: visible;
-        }
-
-        .chart-bar {
-            fill: url(#cyan-gradient);
-            rx: 4px;
-            transition: height 0.4s ease, y 0.4s ease, fill 0.2s ease;
-            cursor: pointer;
-        }
-
-        .chart-bar:hover {
-            fill: url(#indigo-gradient);
-            filter: drop-shadow(0 0 8px rgba(129, 140, 248, 0.6));
-        }
-
-        /* Top Domains Ranking List */
-        .top-domains-list {
-            display: flex;
-            flex-direction: column;
-            gap: 0.85rem;
-            max-height: 250px;
-            overflow-y: auto;
-            padding-right: 0.5rem;
-        }
-
-        .top-domain-item {
-            display: flex;
-            flex-direction: column;
-            gap: 0.3rem;
-        }
-
-        .domain-info {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.85rem;
-        }
-
-        .domain-name {
-            font-weight: 600;
-            color: var(--text-main);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 200px;
-        }
-
-        .domain-count {
-            color: var(--accent-cyan);
-            font-family: monospace;
-        }
-
-        .progress-bg {
-            height: 6px;
-            background: rgba(255, 255, 255, 0.08);
-            border-radius: 4px;
-            overflow: hidden;
-        }
-
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--accent-cyan), var(--accent-indigo));
-            border-radius: 4px;
-            transition: width 0.5s ease;
-        }
-
-        /* Live Terminal Log Streamer */
-        .log-terminal {
-            width: 100%;
-            height: 320px;
-            background: rgba(11, 15, 25, 0.85);
-            border: 1px solid var(--glass-border);
-            border-radius: 16px;
-            padding: 1rem 1.25rem;
-            font-family: "SF Mono", "Fira Code", Consolas, Monaco, monospace;
-            font-size: 0.82rem;
-            line-height: 1.6;
-            overflow-y: auto;
-            color: #cbd5e1;
-        }
-
-        .log-line {
-            display: flex;
-            gap: 0.75rem;
-            margin-bottom: 0.3rem;
-            word-break: break-all;
-            align-items: baseline;
-        }
-
-        .log-time {
-            color: var(--text-muted);
-            flex-shrink: 0;
-        }
-
-        .log-badge-DEBUG { color: #38bdf8; background: rgba(56, 189, 248, 0.15); padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 700; flex-shrink: 0; }
-        .log-badge-INFO { color: #4ade80; background: rgba(74, 222, 128, 0.15); padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 700; flex-shrink: 0; }
-        .log-badge-WARN { color: #fbbf24; background: rgba(251, 191, 36, 0.15); padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 700; flex-shrink: 0; }
-        .log-badge-ERROR { color: #f87171; background: rgba(248, 113, 113, 0.15); padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: 700; flex-shrink: 0; }
-
-        .log-msg {
-            color: #e2e8f0;
-        }
-
-        /* Monospace YAML Editor */
-        .config-editor-textarea {
-            width: 100%;
-            height: 380px;
-            background: rgba(11, 15, 25, 0.7);
-            border: 1px solid var(--glass-border);
-            border-radius: 16px;
-            padding: 1.25rem;
-            color: #e2e8f0;
-            font-family: "SF Mono", "Fira Code", Consolas, Monaco, monospace;
-            font-size: 0.9rem;
-            line-height: 1.5;
-            resize: vertical;
-            outline: none;
-            transition: border-color 0.3s ease;
-        }
-
-        .config-editor-textarea:focus {
-            border-color: var(--accent-cyan);
-            box-shadow: 0 0 20px rgba(56, 189, 248, 0.15);
-        }
-
-        /* Editor Banner */
-        .editor-banner {
-            padding: 0.85rem 1.25rem;
-            border-radius: 12px;
-            margin-bottom: 1rem;
-            font-size: 0.9rem;
-            display: none;
-        }
-
-        .banner-success {
-            background: rgba(74, 222, 128, 0.15);
-            border: 1px solid rgba(74, 222, 128, 0.3);
-            color: var(--success-color);
-        }
-
-        .banner-error {
-            background: rgba(248, 113, 113, 0.15);
-            border: 1px solid rgba(248, 113, 113, 0.3);
-            color: var(--error-color);
-        }
-
-        /* Tables */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-            margin-top: 1rem;
-        }
-
-        th {
-            color: var(--text-muted);
-            font-size: 0.8rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            padding: 0.75rem 1rem;
-            border-bottom: 1px solid var(--glass-border);
-        }
-
-        td {
-            padding: 1rem;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            font-size: 0.9rem;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
-        }
-
-        .endpoint-link {
-            color: var(--accent-cyan);
-            text-decoration: none;
-            font-family: monospace;
-        }
-
-        .endpoint-link:hover {
-            text-decoration: underline;
-        }
-
-        .format-badge {
-            background: rgba(129, 140, 248, 0.15);
-            color: var(--accent-indigo);
-            border: 1px solid rgba(129, 140, 248, 0.3);
-            padding: 0.2rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
-            font-weight: 600;
-        }
-
-        /* Footer */
-        .system-info {
-            padding: 1.25rem 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.85rem;
-            color: var(--text-muted);
-        }
-    </style>
+    <script src="theme.js"></script>
+    <script src="mcp.js" defer></script>
+    <link rel="stylesheet" href="theme.css">
 </head>
 <body>
+    <a class="skip-link" href="#overview">Skip to dashboard</a>
     <!-- Ambient Background Lighting -->
     <div class="ambient-bg">
         <div class="blob blob-1"></div>
@@ -633,8 +24,9 @@
             <h2 style="margin: 0 0 0.5rem; font-size: 1.5rem; font-weight: 700;">Gateway Dashboard</h2>
             <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.25rem;">Authentication required to access management API and configuration.</p>
             <div id="login-error" class="editor-banner banner-error" style="display: none; margin-bottom: 1rem;"></div>
+            <label class="theme-control">Theme <select class="theme-select" aria-label="Login color theme" onchange="setTheme(this.value)"><option value="light">☀ 白天 / Light</option><option value="dark">☾ 黑夜 / Dark</option><option value="system">◐ System</option></select></label>
             <form onsubmit="event.preventDefault(); submitLogin();">
-                <input type="password" id="login-secret" class="login-input" placeholder="Enter Admin Secret / Password..." required autofocus />
+                <input type="password" aria-label="Admin password" autocomplete="current-password" id="login-secret" class="login-input" placeholder="Enter Admin Secret / Password..." required autofocus />
                 <button type="submit" class="btn-action btn-primary" style="width: 100%; padding: 0.85rem; font-size: 1rem; border-radius: 14px;">🔓 Sign In</button>
             </form>
         </div>
@@ -644,19 +36,27 @@
     <header class="navbar glass-panel">
         <div class="brand">
             <div class="brand-logo">⚡</div>
-            <h1 class="brand-title">TProxy Gateway</h1>
+            <div><h1 class="brand-title">TProxy Gateway</h1><div class="brand-caption">NETWORK OPERATIONS</div></div>
         </div>
-        <div style="display: flex; align-items: center; gap: 1rem;">
+        <div class="navbar-actions">
+            <label class="theme-control">Theme <select class="theme-select" aria-label="Color theme" onchange="setTheme(this.value)"><option value="light">☀ 白天 / Light</option><option value="dark">☾ 黑夜 / Dark</option><option value="system">◐ System</option></select></label>
             <div class="status-pill" id="status-pill">
                 <div class="pulse-dot" id="pulse-dot"></div>
-                <span id="status-text">SYSTEM ONLINE</span>
+                <span id="status-text" role="status">CONNECTING</span>
             </div>
             <button id="btn-logout" class="btn-action btn-secondary" onclick="logout()" style="padding: 0.5rem 1rem; border-radius: 30px; font-size: 0.85rem; display: none;">🔒 Logout</button>
         </div>
     </header>
 
     <!-- Main Content Container -->
-    <main class="container">
+    <main class="container" id="overview">
+        <div class="overview-heading">
+            <div><div class="eyebrow">GATEWAY / OVERVIEW</div><h2>Your network, at a glance.</h2><p>Live traffic, DNS insights and gateway controls in one place.</p></div>
+            <div class="refresh-note">Live telemetry · <span id="last-updated">Waiting for data</span></div>
+        </div>
+        <nav class="section-nav" aria-label="Dashboard sections">
+            <a href="#overview">Overview</a><a href="#analytics">Analytics</a><a href="#controls">Controls</a><a href="#connections">Connections</a><a href="#proxy-nodes">Proxies</a><a href="#logs">Logs</a><a href="#configuration">Configuration</a><a href="#mcp">MCP</a>
+        </nav>
         <!-- Grid of Stat Cards -->
         <div class="grid">
             <div class="stat-card glass-panel">
@@ -715,98 +115,8 @@
             </div>
         </div>
 
-        <!-- Quick Gateway Control Panel -->
-        <section class="section-panel glass-panel">
-            <div class="section-header">
-                <h2 class="section-title">
-                    <span>⚡</span>
-                    <span>Quick Control Panel</span>
-                </h2>
-            </div>
-
-            <div id="control-banner" class="editor-banner"></div>
-
-            <div class="control-grid">
-                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_dns_cache', 'Flush DNS Cache')">
-                    <span>🧹</span>
-                    <span>Flush DNS Cache</span>
-                </button>
-                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_fakeip_cache', 'Flush FakeIP Pool')">
-                    <span>🛡️</span>
-                    <span>Flush FakeIP Pool</span>
-                </button>
-                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_analytics', 'Clear Analytics')">
-                    <span>📊</span>
-                    <span>Clear Telemetry</span>
-                </button>
-                <button class="btn-action btn-primary" onclick="executeControlAction('reload_rules', 'Reload Rules')">
-                    <span>🔄</span>
-                    <span>Hot-Reload Rules</span>
-                </button>
-                <button class="btn-action btn-danger" onclick="confirmRestartGateway()">
-                    <span>🚀</span>
-                    <span>Restart Gateway</span>
-                </button>
-            </div>
-        </section>
-
-        <!-- Active Connections Live Inspector Panel -->
-        <section class="section-panel glass-panel">
-            <div class="section-header">
-                <h2 class="section-title">
-                    <span>🔌</span>
-                    <span>Active TCP Connections Inspector (<span id="conn-count-badge" style="color:var(--accent-cyan);">0</span>)</span>
-                </h2>
-                <button class="btn-action btn-secondary" onclick="fetchActiveConnections()">🔄 Refresh</button>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Client IP</th>
-                        <th>Target Endpoint</th>
-                        <th>Domain / SNI</th>
-                        <th>Proxy Upstream</th>
-                        <th>Uptime</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody id="connections-table-body">
-                    <tr><td colspan="6" style="color:var(--text-muted); text-align:center;">No active TCP streams currently tracked.</td></tr>
-                </tbody>
-            </table>
-        </section>
-
-        <!-- Proxy Node Latency Dashboard -->
-        <section class="section-panel glass-panel">
-            <div class="section-header">
-                <h2 class="section-title">
-                    <span>⚡</span>
-                    <span>Proxy Nodes Latency & Health Inspector</span>
-                </h2>
-                <button class="btn-action btn-primary" onclick="pingProxyNodes()">⚡ Test All Latencies</button>
-            </div>
-            <div id="proxy-ping-container" class="control-grid">
-                <div style="color:var(--text-muted); font-size:0.85rem;">Click 'Test All Latencies' to measure proxy node response speed.</div>
-            </div>
-        </section>
-
-        <!-- FakeIP Lookup & Inspector Panel -->
-        <section class="section-panel glass-panel">
-            <div class="section-header">
-                <h2 class="section-title">
-                    <span>🧠</span>
-                    <span>FakeIP Domain Resolver Inspector</span>
-                </h2>
-            </div>
-            <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
-                <input type="text" id="fakeip-lookup-input" class="login-input" style="margin: 0; flex: 1; padding: 0.75rem 1.25rem;" placeholder="Enter domain name to resolve FakeIP (e.g. sex.i2p, google.com)..." />
-                <button class="btn-action btn-primary" onclick="lookupFakeIP()">🔍 Resolve FakeIP</button>
-            </div>
-            <div id="fakeip-result-box" class="editor-banner banner-success" style="display: none;"></div>
-        </section>
-
         <!-- Analytics Split: 30-Day Trend Chart + Top Visited Domains -->
-        <div class="analytics-split">
+        <div class="analytics-split" id="analytics">
             <!-- 30-Day Telemetry Bar Chart -->
             <div class="glass-panel" style="padding: 2rem;">
                 <div class="section-header">
@@ -815,9 +125,9 @@
                         <span>DNS Resolution Volume Trend</span>
                     </h2>
                     <div class="chart-header-actions">
-                        <button class="filter-btn active" onclick="setChartRange(24)">24H</button>
-                        <button class="filter-btn" onclick="setChartRange(168)">7D</button>
-                        <button class="filter-btn" onclick="setChartRange(720)">30D</button>
+                        <button class="filter-btn active" onclick="setChartRange(24, this)">24H</button>
+                        <button class="filter-btn" onclick="setChartRange(168, this)">7D</button>
+                        <button class="filter-btn" onclick="setChartRange(720, this)">30D</button>
                     </div>
                 </div>
 
@@ -852,8 +162,98 @@
             </div>
         </div>
 
+        <!-- Quick Gateway Control Panel -->
+        <section class="section-panel glass-panel" id="controls">
+            <div class="section-header">
+                <h2 class="section-title">
+                    <span>⚡</span>
+                    <span>Quick Control Panel</span>
+                </h2>
+            </div>
+
+            <div id="control-banner" class="editor-banner"></div>
+
+            <div class="control-grid">
+                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_dns_cache', 'Flush DNS Cache')">
+                    <span>🧹</span>
+                    <span>Flush DNS Cache</span>
+                </button>
+                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_fakeip_cache', 'Flush FakeIP Pool')">
+                    <span>🛡️</span>
+                    <span>Flush FakeIP Pool</span>
+                </button>
+                <button class="btn-action btn-secondary" onclick="executeControlAction('clear_analytics', 'Clear Analytics')">
+                    <span>📊</span>
+                    <span>Clear Telemetry</span>
+                </button>
+                <button class="btn-action btn-primary" onclick="executeControlAction('reload_rules', 'Reload Rules')">
+                    <span>🔄</span>
+                    <span>Hot-Reload Rules</span>
+                </button>
+                <button class="btn-action btn-danger" onclick="confirmRestartGateway()">
+                    <span>🚀</span>
+                    <span>Restart Gateway</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- Active Connections Live Inspector Panel -->
+        <section class="section-panel glass-panel" id="connections">
+            <div class="section-header">
+                <h2 class="section-title">
+                    <span>🔌</span>
+                    <span>Active TCP Connections Inspector (<span id="conn-count-badge" style="color:var(--accent-cyan);">0</span>)</span>
+                </h2>
+                <button class="btn-action btn-secondary" onclick="fetchActiveConnections()">🔄 Refresh</button>
+            </div>
+            <div class="table-scroll" role="region" aria-label="Scrollable data table" tabindex="0"><table>
+                <thead>
+                    <tr>
+                        <th>Client IP</th>
+                        <th>Target Endpoint</th>
+                        <th>Domain / SNI</th>
+                        <th>Proxy Upstream</th>
+                        <th>Uptime</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="connections-table-body">
+                    <tr><td colspan="6" style="color:var(--text-muted); text-align:center;">No active TCP streams currently tracked.</td></tr>
+                </tbody>
+            </table></div>
+        </section>
+
+        <!-- Proxy Node Latency Dashboard -->
+        <section class="section-panel glass-panel" id="proxy-nodes">
+            <div class="section-header">
+                <h2 class="section-title">
+                    <span>⚡</span>
+                    <span>Proxy Nodes Latency & Health Inspector</span>
+                </h2>
+                <button class="btn-action btn-primary" onclick="pingProxyNodes()">⚡ Test All Latencies</button>
+            </div>
+            <div id="proxy-ping-container" class="control-grid">
+                <div style="color:var(--text-muted); font-size:0.85rem;">Click 'Test All Latencies' to measure proxy node response speed.</div>
+            </div>
+        </section>
+
+        <!-- FakeIP Lookup & Inspector Panel -->
+        <section class="section-panel glass-panel" id="fakeip">
+            <div class="section-header">
+                <h2 class="section-title">
+                    <span>🧠</span>
+                    <span>FakeIP Domain Resolver Inspector</span>
+                </h2>
+            </div>
+            <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                <input type="text" aria-label="Domain to resolve" id="fakeip-lookup-input" class="login-input" style="margin: 0; flex: 1; padding: 0.75rem 1.25rem;" placeholder="Enter domain name to resolve FakeIP (e.g. example.i2p, google.com)..." />
+                <button class="btn-action btn-primary" onclick="lookupFakeIP()">🔍 Resolve FakeIP</button>
+            </div>
+            <div id="fakeip-result-box" class="editor-banner banner-success" style="display: none;"></div>
+        </section>
+
         <!-- Live System Log Streamer Panel -->
-        <section class="section-panel glass-panel">
+        <section class="section-panel glass-panel" id="logs">
             <div class="section-header" style="flex-wrap: wrap; gap: 1rem;">
                 <h2 class="section-title">
                     <span>📜</span>
@@ -870,7 +270,7 @@
             </div>
 
             <div style="margin-bottom: 1rem;">
-                <input type="text" id="log-filter-input" oninput="renderLogs()" class="login-input" style="margin: 0; padding: 0.6rem 1rem; font-size: 0.85rem;" placeholder="Filter log keyword (e.g. [TCP], FakeIP, i2p, DNS)..." />
+                <input type="text" aria-label="Filter logs" id="log-filter-input" oninput="renderLogs()" class="login-input" style="margin: 0; padding: 0.6rem 1rem; font-size: 0.85rem;" placeholder="Filter log keyword (e.g. [TCP], FakeIP, i2p, DNS)..." />
             </div>
 
             <div id="log-terminal" class="log-terminal">
@@ -879,7 +279,7 @@
         </section>
 
         <!-- Online Configuration Editor Panel -->
-        <section class="section-panel glass-panel">
+        <section class="section-panel glass-panel" id="configuration">
             <div class="section-header">
                 <h2 class="section-title">
                     <span>🛠️</span>
@@ -893,7 +293,49 @@
 
             <div id="editor-banner" class="editor-banner"></div>
 
-            <textarea id="config-editor" class="config-editor-textarea" spellcheck="false" placeholder="Loading configuration..."></textarea>
+            <textarea aria-label="Gateway YAML configuration" id="config-editor" class="config-editor-textarea" spellcheck="false" placeholder="Loading configuration..."></textarea>
+        </section>
+
+        <section class="section-panel glass-panel" id="mcp">
+            <div class="section-header">
+                <h2 class="section-title"><span>🔌</span><span>MCP · AI Client Access</span></h2>
+                <span class="format-badge" id="mcp-status">Checking status</span>
+            </div>
+            <p class="mcp-description">Connect your MCP client to this gateway. Inspect traffic, routing, DNS, logs and configuration from the same web service.</p>
+            <label class="mcp-label" for="mcp-endpoint">Streamable HTTP endpoint</label>
+            <input class="mcp-endpoint" id="mcp-endpoint" type="text" readonly spellcheck="false" aria-label="MCP endpoint URL">
+            <div class="mcp-details"><span>16 tools · 7 resources · 2 prompts</span><span id="mcp-policy">Waiting for gateway</span></div>
+            <form id="mcp-auth-form" onsubmit="event.preventDefault(); saveMCPAuthSettings();" autocomplete="off">
+                <label class="mcp-label" for="mcp-auth-mode">认证方式 / Authentication</label>
+                <select class="mcp-input" id="mcp-auth-mode" onchange="updateMCPAuthFields()">
+                    <option value="inherit">复用 WebUI 密码（兼容默认设置）</option>
+                    <option value="bearer">Bearer Token · 独立令牌</option>
+                    <option value="api_key">API Key · 请求头密钥</option>
+                    <option value="basic">Basic · 用户名和密码</option>
+                    <option value="none">免认证</option>
+                </select>
+                <div id="mcp-auth-bearer" hidden>
+                    <label class="mcp-label" for="mcp-auth-token">Bearer Token</label>
+                    <div class="mcp-credential-row"><input class="mcp-input" type="password" id="mcp-auth-token" autocomplete="new-password" spellcheck="false" placeholder="输入令牌；留空保留已保存的值"><button class="btn-action btn-secondary" type="button" onclick="generateMCPCredential('mcp-auth-token')">生成令牌</button><button class="btn-action btn-secondary" type="button" onclick="toggleMCPCredential('mcp-auth-token', this)">显示</button></div>
+                </div>
+                <div id="mcp-auth-api-key" hidden>
+                    <label class="mcp-label" for="mcp-auth-key-header">API Key Header</label>
+                    <input class="mcp-input" id="mcp-auth-key-header" value="X-API-Key" spellcheck="false" placeholder="X-API-Key">
+                    <label class="mcp-label" for="mcp-auth-api-key-value">API Key</label>
+                    <div class="mcp-credential-row"><input class="mcp-input" type="password" id="mcp-auth-api-key-value" autocomplete="new-password" spellcheck="false" placeholder="输入密钥；留空保留已保存的值"><button class="btn-action btn-secondary" type="button" onclick="generateMCPCredential('mcp-auth-api-key-value')">生成密钥</button><button class="btn-action btn-secondary" type="button" onclick="toggleMCPCredential('mcp-auth-api-key-value', this)">显示</button></div>
+                </div>
+                <div id="mcp-auth-basic" hidden>
+                    <label class="mcp-label" for="mcp-auth-username">用户名 / Username</label>
+                    <input class="mcp-input" id="mcp-auth-username" autocomplete="off" spellcheck="false">
+                    <label class="mcp-label" for="mcp-auth-password">密码 / Password</label>
+                    <div class="mcp-credential-row"><input class="mcp-input" type="password" id="mcp-auth-password" autocomplete="new-password" placeholder="输入密码；留空保留已保存的值"><button class="btn-action btn-secondary" type="button" onclick="toggleMCPCredential('mcp-auth-password', this)">显示</button></div>
+                </div>
+                <p class="mcp-description" id="mcp-auth-hint">复用 ui.secret，支持 Bearer 和 X-UI-Token 请求头。</p>
+                <code class="mcp-auth-example" id="mcp-auth-example">Authorization: Bearer &lt;ui.secret&gt;</code>
+                <div class="mcp-auth-actions"><button class="btn-action btn-primary" type="submit" id="mcp-auth-save" disabled>保存并生效</button><button class="btn-action btn-secondary" type="button" onclick="loadMCPAuthSettings()">重新加载</button><span>密钥留空保留原值；设置不会更改 WebUI 登录密码。</span></div>
+                <div id="mcp-auth-banner" class="editor-banner" role="status" aria-live="polite"></div>
+            </form>
+            <p class="mcp-description">Enable <code>mcp.enabled</code> in the configuration. Gateway changes require <code>mcp.allow_writes: true</code>.</p>
         </section>
 
         <!-- Telemetry Endpoints Table -->
@@ -904,7 +346,7 @@
                     <span>API & Telemetry Endpoints</span>
                 </h2>
             </div>
-            <table>
+            <div class="table-scroll" role="region" aria-label="Scrollable data table" tabindex="0"><table>
                 <thead>
                     <tr>
                         <th>Service / Metric</th>
@@ -928,7 +370,7 @@
                     </tr>
                     <tr>
                         <td>FakeIP Lookup API</td>
-                        <td><a href="/api/fakeip/lookup?domain=sex.i2p" target="_blank" class="endpoint-link">/api/fakeip/lookup</a></td>
+                        <td><a href="/api/fakeip/lookup?domain=example.i2p" target="_blank" class="endpoint-link">/api/fakeip/lookup</a></td>
                         <td><span class="format-badge">JSON</span></td>
                         <td>Domain to FakeIP mapping resolver and inspector.</td>
                     </tr>
@@ -969,7 +411,7 @@
                         <td>Real-time gateway status payload for automation scripts.</td>
                     </tr>
                 </tbody>
-            </table>
+            </table></div>
         </section>
 
         <!-- System Footer -->
@@ -984,26 +426,46 @@
         let cachedHourlyTrend = [];
         let isLogPaused = false;
         let cachedLogEntries = [];
+        const pendingGets = new Map();
+        let authGeneration = 0;
 
         function getStoredToken() {
             return localStorage.getItem('tproxy_token') || '';
         }
 
         async function authFetch(url, options = {}) {
-            options.headers = options.headers || {};
+            const headers = new Headers(options.headers || {});
             const token = getStoredToken();
             if (token) {
-                options.headers['Authorization'] = 'Bearer ' + token;
+                headers.set('Authorization', 'Bearer ' + token);
             }
-            const res = await fetch(url, options);
+            const generation = authGeneration;
+            const isGet = !options.method || options.method.toUpperCase() === 'GET';
+            const key = token + '\n' + url;
+            let request = isGet ? pendingGets.get(key) : null;
+            if (!request) {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), isGet ? 30000 : 120000);
+                request = fetch(url, { ...options, headers, signal: controller.signal }).finally(() => {
+                    clearTimeout(timeout);
+                    if (isGet) pendingGets.delete(key);
+                });
+                if (isGet) pendingGets.set(key, request);
+            }
+            const res = (await request).clone();
+            if (generation !== authGeneration) throw new Error('Unauthorized');
             if (res.status === 401) {
                 showLoginModal("Authentication required or session expired. Please enter password.");
                 throw new Error("Unauthorized");
             }
+            if (!res.ok && isGet) throw new Error('Request failed: HTTP ' + res.status);
             return res;
         }
 
         function showLoginModal(msg) {
+            if (typeof clearMCPAuthCredentials === 'function') clearMCPAuthCredentials();
+            if (!dashboardAuthPaused) authGeneration++;
+            pauseDashboardPolling();
             document.getElementById('login-modal').style.display = 'flex';
             document.getElementById('btn-logout').style.display = 'none';
             if (msg) {
@@ -1015,6 +477,7 @@
 
         function hideLoginModal() {
             document.getElementById('login-modal').style.display = 'none';
+            resumeDashboardPolling();
             document.getElementById('btn-logout').style.display = 'inline-flex';
         }
 
@@ -1031,11 +494,13 @@
                 });
                 const data = await res.json();
                 if (res.ok && data.status === 'success') {
+                    authGeneration++;
                     localStorage.setItem('tproxy_token', secret);
                     hideLoginModal();
                     updateStats();
                     updateAnalytics();
                     loadConfigFile();
+                    loadMCPAuthSettings();
                     fetchLogs();
                     fetchActiveConnections();
                 } else {
@@ -1050,6 +515,7 @@
 
         function logout() {
             localStorage.removeItem('tproxy_token');
+            clearMCPAuthCredentials();
             showLoginModal("Logged out successfully.");
         }
 
@@ -1070,7 +536,7 @@
             document.getElementById('conn-count-badge').innerText = conns.length;
 
             if (!conns || conns.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted); text-align:center;">No active TCP streams currently tracked.</td></tr>';
+                setHTMLIfChanged(tbody, '<tr><td colspan="6" style="color:var(--text-muted); text-align:center;">No active TCP streams currently tracked.</td></tr>');
                 return;
             }
 
@@ -1089,7 +555,7 @@
                     </tr>
                 `;
             });
-            tbody.innerHTML = html;
+            setHTMLIfChanged(tbody, html);
         }
 
         async function killConnection(id) {
@@ -1113,7 +579,7 @@
 
         async function pingProxyNodes() {
             const container = document.getElementById('proxy-ping-container');
-            container.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem;">Testing node latencies...</div>';
+            setHTMLIfChanged(container, '<div style="color:var(--text-muted); font-size:0.85rem;">Testing node latencies...</div>');
 
             try {
                 const res = await authFetch('/api/proxy/ping', { method: 'POST' });
@@ -1122,7 +588,7 @@
                     renderProxyPingResults(data.nodes || {});
                 }
             } catch (e) {
-                if (e.message !== "Unauthorized") container.innerHTML = '<div style="color:var(--error-color);">Failed to test node latencies.</div>';
+                if (e.message !== "Unauthorized") setHTMLIfChanged(container, '<div style="color:var(--error-color);">Failed to test node latencies.</div>');
             }
         }
 
@@ -1130,7 +596,7 @@
             const container = document.getElementById('proxy-ping-container');
             const keys = Object.keys(nodes);
             if (keys.length === 0) {
-                container.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem;">No proxy nodes configured in rules or proxy groups.</div>';
+                setHTMLIfChanged(container, '<div style="color:var(--text-muted); font-size:0.85rem;">No proxy nodes configured in rules or proxy groups.</div>');
                 return;
             }
 
@@ -1149,7 +615,7 @@
                     </div>
                 `;
             });
-            container.innerHTML = html;
+            setHTMLIfChanged(container, html);
         }
 
         async function lookupFakeIP() {
@@ -1249,31 +715,35 @@
             }
 
             if (!filtered || filtered.length === 0) {
-                terminal.innerHTML = '<div style="color:var(--text-muted);">No matching log entries found.</div>';
+                setHTMLIfChanged(terminal, '<div style="color:var(--text-muted);">No matching log entries found.</div>');
                 return;
             }
 
             let html = '';
             filtered.forEach(item => {
-                const lvl = (item.level || 'INFO').toUpperCase();
+                const rawLevel = String(item.level || 'INFO').toUpperCase();
+                const lvl = ['DEBUG', 'INFO', 'WARN', 'ERROR'].includes(rawLevel) ? rawLevel : 'INFO';
                 html += `
                     <div class="log-line">
                         <span class="log-time">[${escapeHtml(item.timestamp)}]</span>
-                        <span class="log-badge-${lvl}">${lvl}</span>
+                        <span class="log-badge-${lvl}">${escapeHtml(lvl)}</span>
                         <span class="log-msg">${escapeHtml(item.message)}</span>
                     </div>
                 `;
             });
-            terminal.innerHTML = html;
-            if (!isLogPaused) {
-                terminal.scrollTop = terminal.scrollHeight;
-            }
+            const logNearBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 48;
+            const logChanged = setHTMLIfChanged(terminal, html);
+            if (!isLogPaused && logChanged && logNearBottom) terminal.scrollTop = terminal.scrollHeight;
         }
 
         async function updateStats() {
             try {
                 const res = await authFetch('/api/state');
                 const data = await res.json();
+                document.getElementById('mcp-endpoint').value = new URL('/mcp', window.location.href).href;
+                document.getElementById('mcp-status').textContent = data.preview ? 'Preview only' : (data.mcp_enabled ? 'MCP enabled' : 'MCP disabled');
+                document.getElementById('mcp-policy').textContent = data.preview ? 'Connect to your running gateway' : (data.mcp_allow_writes ? 'Query & management tools allowed' : 'Read-only mode');
+                document.getElementById('last-updated').innerText = (data.preview ? 'Preview · ' : '') + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 document.getElementById('dns-queries').innerText = (data.dns_queries_total || 0).toLocaleString();
                 document.getElementById('dns-cache-count').innerText = (data.dns_cache_records_total || 0).toLocaleString();
                 document.getElementById('active-tcp').innerText = (data.active_tcp_conns || 0).toLocaleString();
@@ -1287,7 +757,7 @@
                 // Update Navbar status pill
                 const pill = document.getElementById('status-pill');
                 if (pill) {
-                    pill.style.background = 'rgba(74, 222, 128, 0.12)';
+                    pill.style.background = 'var(--success-bg)';
                     pill.style.borderColor = 'rgba(74, 222, 128, 0.25)';
                     pill.style.color = 'var(--success-color)';
                     document.getElementById('pulse-dot').style.backgroundColor = 'var(--success-color)';
@@ -1309,7 +779,7 @@
                     console.error("Failed to fetch telemetry state:", e);
                     const pill = document.getElementById('status-pill');
                     if (pill) {
-                        pill.style.background = 'rgba(248, 113, 113, 0.12)';
+                        pill.style.background = 'var(--error-bg)';
                         pill.style.borderColor = 'rgba(248, 113, 113, 0.25)';
                         pill.style.color = 'var(--error-color)';
                         document.getElementById('pulse-dot').style.backgroundColor = 'var(--error-color)';
@@ -1427,7 +897,7 @@
         function renderTopDomains(domains) {
             const container = document.getElementById('top-domains-container');
             if (!domains || domains.length === 0) {
-                container.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem;">No historical domain data yet.</div>';
+                setHTMLIfChanged(container, '<div style="color:var(--text-muted); font-size:0.85rem;">No historical domain data yet.</div>');
                 return;
             }
 
@@ -1447,13 +917,13 @@
                     </div>
                 `;
             });
-            container.innerHTML = html;
+            setHTMLIfChanged(container, html);
         }
 
         function renderTrendChart(trendData, hoursLimit) {
             const svgBars = document.getElementById('chart-bars');
             if (!trendData || trendData.length === 0) {
-                svgBars.innerHTML = '<text x="375" y="130" text-anchor="middle" fill="var(--text-muted)">No historical DNS trend data recorded yet.</text>';
+                setHTMLIfChanged(svgBars, '<text x="375" y="130" text-anchor="middle" fill="var(--text-muted)">No historical DNS trend data recorded yet.</text>');
                 return;
             }
 
@@ -1473,8 +943,9 @@
             const chartHeight = viewBoxHeight - paddingTop - paddingBottom;
             const axisY = paddingTop + chartHeight;
 
-            const barGap = Math.max(1, chartWidth / (totalBars * 4));
-            const barWidth = Math.max(2, (chartWidth - (totalBars * barGap)) / totalBars);
+            const slotWidth = chartWidth / totalBars;
+            const barGap = Math.min(6, slotWidth * 0.22);
+            const barWidth = slotWidth - barGap;
 
             let html = '';
 
@@ -1485,7 +956,7 @@
                 const yPos = paddingTop + (chartHeight * (1 - ratio));
                 const val = Math.round(maxVal * ratio);
 
-                html += `<line x1="${paddingLeft}" y1="${yPos}" x2="${viewBoxWidth - paddingRight}" y2="${yPos}" stroke="${i === 0 ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.08)'}" stroke-dasharray="${i === 0 ? 'none' : '4 4'}" />`;
+                html += `<line x1="${paddingLeft}" y1="${yPos}" x2="${viewBoxWidth - paddingRight}" y2="${yPos}" stroke="${i === 0 ? 'var(--chart-grid)' : 'var(--chart-grid)'}" stroke-dasharray="${i === 0 ? 'none' : '4 4'}" />`;
                 html += `<text x="${paddingLeft - 10}" y="${yPos + 4}" text-anchor="end" fill="var(--text-muted)" font-size="11" font-family="monospace">${val.toLocaleString()}</text>`;
             }
 
@@ -1498,7 +969,7 @@
 
                 html += `
                     <rect class="chart-bar" x="${x}" y="${y}" width="${barWidth}" height="${Math.max(2, barHeight)}">
-                        <title>${d.timestamp}: ${val.toLocaleString()} DNS Queries</title>
+                        <title>${escapeHtml(d.timestamp)}: ${val.toLocaleString()} DNS Queries</title>
                     </rect>
                 `;
             });
@@ -1514,36 +985,31 @@
                     labelText = labelText.substring(5, 16).replace('T', ' ');
                 }
 
-                html += `<line x1="${x}" y1="${axisY}" x2="${x}" y2="${axisY + 4}" stroke="rgba(255,255,255,0.3)" />`;
+                html += `<line x1="${x}" y1="${axisY}" x2="${x}" y2="${axisY + 4}" stroke="var(--chart-grid)" />`;
                 html += `<text x="${x}" y="${axisY + 20}" text-anchor="middle" fill="var(--text-muted)" font-size="10" font-family="-apple-system, sans-serif">${escapeHtml(labelText)}</text>`;
             }
 
-            svgBars.innerHTML = html;
+            setHTMLIfChanged(svgBars, html);
         }
 
-        function setChartRange(hours) {
+        function setChartRange(hours, button) {
             currentRangeHours = hours;
-            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            document.querySelectorAll('.chart-header-actions .filter-btn').forEach(btn => btn.classList.remove('active'));
+            button.classList.add('active');
             renderTrendChart(cachedHourlyTrend, hours);
         }
 
         function escapeHtml(str) {
-            return str.replace(/[&<>"']/g, function(m) {
+            return String(str ?? '').replace(/[&<>"']/g, function(m) {
                 return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m];
             });
         }
 
-        setInterval(updateStats, 2000);
-        setInterval(fetchActiveConnections, 3000);
-        setInterval(updateAnalytics, 10000);
-        setInterval(fetchLogs, 3000);
-        updateStats();
-        updateAnalytics();
+        startDashboardPoll(updateStats, 2000);
+        startDashboardPoll(fetchActiveConnections, 3000);
+        startDashboardPoll(updateAnalytics, 10000);
+        startDashboardPoll(fetchLogs, 3000);
         loadConfigFile();
-        fetchLogs();
-        fetchActiveConnections();
-        pingProxyNodes();
     </script>
 </body>
 </html>

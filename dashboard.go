@@ -177,7 +177,7 @@ func initDashboardRoutes(cfg UIConfig, defaultPortAddr string) *http.ServeMux {
 		}
 
 		if enablePort && listenAddr != "" {
-			zap.S().Infof("🎨 WebUI Mode [%s]: HTTP Port Listening -> http://%s/ui/", strings.ToUpper(mode), listenAddr)
+			zap.S().Infof("🎨 WebUI Mode [%s]: Uses shared management listener (metrics.addr when enabled, otherwise ui.addr)", strings.ToUpper(mode))
 		}
 	}
 
@@ -189,6 +189,7 @@ func initDashboardRoutes(cfg UIConfig, defaultPortAddr string) *http.ServeMux {
 	registerAuthRoutes(mux)
 	registerLogRoutes(mux)
 	registerConnectionRoutes(mux)
+	registerMCPRoutes(mux)
 
 	globalWebUIMux = mux
 	return mux

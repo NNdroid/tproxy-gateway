@@ -24,12 +24,24 @@ ui:
   enabled: true
   # WebUI 工作模式: "port" (仅物理端口) | "domain" (仅 TProxy 虚拟域名, 零暴露端口) | "both" (两者均有效)
   mode: "both"
-  # 可选：独立 HTTP 监听端口 (在 port 或 both 模式下生效)
+  # 可选：Metrics 关闭时的共享 HTTP 地址；Metrics 开启时沿用 metrics.addr，所有管理服务同端口
   addr: ":9090"
   # 可选：自定义虚拟域名访问 WebUI (在 domain 或 both 模式下生效，如访问 http://dashboard.gateway/)
   domain: "dashboard.gateway"
   # 可选：WebUI 控制台登录密码 / REST API Token (留空或不填则免密访问)
   secret: "admin123"
+
+# MCP 与 WebUI/REST 共用同一个 HTTP 监听端口，端点为 /mcp。
+# ui.secret 同时用作 Bearer Token；读取配置时会脱敏。
+mcp:
+  enabled: true
+  # 默认仅查询；启用后允许保存配置、清缓存、断开连接、修改日志等级和重启。
+  allow_writes: false
+  # 浏览器跨域客户端如需访问，在此列出精确 Origin；普通 MCP 客户端无需设置。
+  allowed_origins: []
+  # inherit: 复用 ui.secret；可在 WebUI 的 MCP 面板改为 bearer/api_key/basic/none。
+  auth:
+    mode: inherit
 
 # ---------------------------------------------------------------------
 # 3. 本机监听服务配置 (Inbound Server Settings)

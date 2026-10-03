@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+	"tproxy-gateway/internal/mcpauth"
 )
 
 var (
@@ -19,6 +20,7 @@ type Config struct {
 	Log           LogConfig          `yaml:"log"`
 	Metrics       MetricsConfig      `yaml:"metrics"`
 	UI            UIConfig           `yaml:"ui"`
+	MCP           MCPConfig          `yaml:"mcp"`
 	Server        ServerConfig       `yaml:"server"`
 	Routing       RoutingConfig      `yaml:"routing"`
 	FakeIP        FakeIPConfig       `yaml:"fake_ip"`
@@ -43,6 +45,13 @@ type UIConfig struct {
 	Addr    string `yaml:"addr"`
 	Domain  string `yaml:"domain"`
 	Secret  string `yaml:"secret"`
+}
+
+type MCPConfig struct {
+	Enabled        bool           `yaml:"enabled"`
+	AllowWrites    bool           `yaml:"allow_writes"`
+	AllowedOrigins []string       `yaml:"allowed_origins"`
+	Auth           mcpauth.Config `yaml:"auth"`
 }
 
 type ServerConfig struct {
@@ -116,6 +125,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %v", err)
 	}
+	if err := mcpauth.Validate(cfg.MCP.Auth); err != nil {
+		return nil, err
+	}
 
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
@@ -153,6 +165,9 @@ func SaveAndValidateConfig(path string, rawYAML []byte) (*Config, error) {
 	var tmpConfig Config
 	if err := yaml.Unmarshal(rawYAML, &tmpConfig); err != nil {
 		return nil, fmt.Errorf("YAML syntax error: %v", err)
+	}
+	if err := mcpauth.Validate(tmpConfig.MCP.Auth); err != nil {
+		return nil, err
 	}
 
 	if _, err := tmpConfig.FakeIP.ParseCIDRs(); err != nil {

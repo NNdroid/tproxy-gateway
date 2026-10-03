@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -317,7 +319,7 @@ func handleTCP(clientConn net.Conn) {
 	if targetEndpoint == "" {
 		targetEndpoint = targetAddr.IP.String()
 	}
-	targetEndpoint = fmt.Sprintf("%s:%d", strings.TrimSuffix(targetEndpoint, "."), targetAddr.Port)
+	targetEndpoint = net.JoinHostPort(strings.TrimSuffix(targetEndpoint, "."), strconv.Itoa(targetAddr.Port))
 
 	zap.S().Debugf("[TCP] New connection from %s -> %s (FakeIP: %s, Domain: '%s', Upstream: '%s')",
 		clientConn.RemoteAddr(), targetEndpoint, targetIP, domain, upstreamProxy)
@@ -348,7 +350,7 @@ func handleTCP(clientConn net.Conn) {
 				zap.S().Warnf("[TCP] Upstream unsupported domain resolution, trying local DNS resolution for IP: %s", domain)
 				ips, _ := defaultResolver.LookupIP(domain)
 				if len(ips) > 0 {
-					targetConn, err = dialProxyConn(upstreamProxy, "tcp", fmt.Sprintf("%s:%d", ips[0].String(), targetAddr.Port), 3*time.Second)
+					targetConn, err = dialProxyConn(upstreamProxy, "tcp", net.JoinHostPort(ips[0].String(), strconv.Itoa(targetAddr.Port)), 3*time.Second)
 					if err == nil {
 						zap.S().Debugf("[TCP] Successfully connected to resolved IP %s via proxy [%s]", ips[0].String(), upstreamProxy)
 						break
@@ -369,7 +371,7 @@ func handleTCP(clientConn net.Conn) {
 			if resolveErr == nil && len(ips) > 0 {
 				zap.S().Debugf("[TCP] Direct resolving '%s' -> %v", domain, ips)
 				for _, ip := range ips {
-					addr := fmt.Sprintf("%s:%d", ip.String(), targetAddr.Port)
+					addr := net.JoinHostPort(ip.String(), strconv.Itoa(targetAddr.Port))
 					targetConn, err = dialer.Dial("tcp", addr)
 					if err == nil {
 						zap.S().Debugf("[TCP] Directly connected to %s (%s)", domain, addr)
@@ -379,7 +381,7 @@ func handleTCP(clientConn net.Conn) {
 			}
 		}
 		if targetConn == nil {
-			targetConn, err = dialer.Dial("tcp", fmt.Sprintf("%s:%d", targetAddr.IP.String(), targetAddr.Port))
+			targetConn, err = dialer.Dial("tcp", net.JoinHostPort(targetAddr.IP.String(), strconv.Itoa(targetAddr.Port)))
 			if err == nil {
 				zap.S().Debugf("[TCP] Directly connected to IP %s:%d", targetAddr.IP.String(), targetAddr.Port)
 			}
@@ -458,6 +460,9 @@ func startUDPTProxy(ctx context.Context, addr string) {
 	for {
 		n, oobn, _, clientAddr, err := udpConn.ReadMsgUDP(buf, oob)
 		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
 			continue
 		}
 		fakeIPAddr, err := parseIPv6OriginalDst(oob[:oobn])
@@ -545,13 +550,13 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 			if targetEndpoint == "" {
 				targetEndpoint = fakeIP.IP.String()
 			}
-			targetEndpoint = fmt.Sprintf("%s:%d", strings.TrimSuffix(targetEndpoint, "."), fakeIP.Port)
+			targetEndpoint = net.JoinHostPort(strings.TrimSuffix(targetEndpoint, "."), strconv.Itoa(fakeIP.Port))
 			zap.S().Debugf("[UDP] Dialing UDP proxy [%s] for %s...", upstreamProxy, targetEndpoint)
 			upstreamConn, err = dialProxyConn(upstreamProxy, "udp", targetEndpoint, 3*time.Second)
 			if err != nil && strings.Contains(err.Error(), "address type not supported") && domain != "" {
 				ips, _ := defaultResolver.LookupIP(domain)
 				if len(ips) > 0 {
-					targetEndpointIP := fmt.Sprintf("%s:%d", ips[0].String(), fakeIP.Port)
+					targetEndpointIP := net.JoinHostPort(ips[0].String(), strconv.Itoa(fakeIP.Port))
 					upstreamConn, err = dialProxyConn(upstreamProxy, "udp", targetEndpointIP, 3*time.Second)
 				}
 			}
@@ -561,11 +566,11 @@ func handleUDP(payload []byte, clientAddr *net.UDPAddr, fakeIP *net.UDPAddr) {
 				return
 			}
 		} else {
-			realTarget := fmt.Sprintf("%s:%d", fakeIP.IP.String(), fakeIP.Port)
+			realTarget := net.JoinHostPort(fakeIP.IP.String(), strconv.Itoa(fakeIP.Port))
 			if domain != "" {
 				ips, resolveErr := defaultResolver.LookupIP(domain)
 				if resolveErr == nil && len(ips) > 0 {
-					realTarget = fmt.Sprintf("%s:%d", ips[0].String(), fakeIP.Port)
+					realTarget = net.JoinHostPort(ips[0].String(), strconv.Itoa(fakeIP.Port))
 				}
 			}
 			zap.S().Debugf("[UDP] Direct dialing UDP %s...", realTarget)
