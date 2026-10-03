@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release Tag Name (e.g. v1.0.20260801)'
+        description: 'Optional expected tag: v1.0.yyyyMMdd.commitCount-7charHash (blank = automatic)'
         required: false
         default: ''
 
@@ -33,59 +33,38 @@ jobs:
 
       - name: Run Unit Tests
         run: |
+          bash scripts/version.test.sh
           go test -count=1 -timeout=120s -v ./...
 
-      - name: Determine Version and Build Binaries
+      - name: Determine Version
+        env:
+          INPUT_TAG: ${{ inputs.tag_name }}
         run: |
-          mkdir -p release_assets
-          
-          INPUT_TAG="${{ github.event.inputs.tag_name }}"
           if [ -n "$INPUT_TAG" ]; then
-            TAG="$INPUT_TAG"
+            EXPECTED_TAG="$INPUT_TAG"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
+            EXPECTED_TAG="${GITHUB_REF_NAME}"
           else
-            TAG="v1.0.$(date +'%Y%m%d')"
+            EXPECTED_TAG=""
           fi
-          
-          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
-          echo "Building binaries for release tag: $TAG"
-          
-          TARGETS=(
-            "linux/amd64/v1"
-            "linux/amd64/v2"
-            "linux/amd64/v3"
-            "linux/amd64/v4"
-            "linux/arm64/"
-            "linux/arm/"
-            "linux/386/"
-            "linux/mipsle/"
-            "linux/mips/"
-            "linux/mips64le/"
-          )
-          
-          for TARGET in "${TARGETS[@]}"
-          do
-            IFS="/" read -r -a SPLIT <<< "$TARGET"
-            GOOS=${SPLIT[0]}
-            GOARCH=${SPLIT[1]}
-            GOAMD64=${SPLIT[2]}
-            
-            if [ -n "$GOAMD64" ]; then
-              OUTPUT_NAME="tproxy-gateway-${GOOS}-${GOARCH}-${GOAMD64}"
-            else
-              OUTPUT_NAME="tproxy-gateway-${GOOS}-${GOARCH}"
-            fi
-            
-            echo "Building $GOOS/$GOARCH ($GOAMD64) with version $TAG..."
-            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOAMD64=$GOAMD64 go build \
-              -trimpath \
-              -ldflags "-s -w -X main.version=${TAG}" \
-              -o "release_assets/$OUTPUT_NAME" .
-          done
-          
+          TAG="$(bash scripts/version.sh "$EXPECTED_TAG")"
+          COMMIT="$(git rev-parse HEAD)"
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$COMMIT"
+          fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          echo "Building $COMMIT as $TAG"
+
+      - name: Build and Verify Release Binaries
+        run: |
+          bash scripts/build.sh "$RELEASE_TAG"
+          test "$(./bin/tproxy-gateway-linux-amd64-v1 --version)" = "$RELEASE_TAG"
+          mkdir -p release_assets
+          cp bin/* release_assets/
           cd release_assets
           sha256sum * > checksums.txt
+          sha256sum -c checksums.txt
           ls -lh
 
       - name: Extract Git Commits Log for Release Notes
@@ -130,6 +109,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ env.RELEASE_COMMIT }}
           name: tproxy-gateway ${{ env.RELEASE_TAG }}
           body_path: release_body.md
           files: |

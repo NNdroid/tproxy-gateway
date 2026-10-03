@@ -33,6 +33,29 @@ A lightweight, high-performance, enterprise-grade dual-stack transparent proxy g
 
 ---
 
+## 📦 Build and Release Versions
+
+Run `bash scripts/build.sh` to build all supported Linux architectures into `bin/`.
+The script works from any directory and generates `v1.0.yyyyMMdd.commitCount-7charHash`,
+for example `v1.0.20261003.12-123abcd`:
+
+* `yyyyMMdd`: the HEAD commit's **committer date in UTC**, so rebuilding a commit keeps its version.
+* `commitCount`: `git rev-list --count HEAD`, including reachable merge history.
+* `7charHash`: exactly the first seven hexadecimal characters of the HEAD commit hash.
+
+Full Git history is required; shallow checkouts must run `git fetch --unshallow` first.
+Passing a version to `build.sh` verifies that it matches the generated value; arbitrary overrides are rejected.
+Uncommitted edits are not represented in the version: build releases from a clean checkout.
+
+Check a binary with `./bin/tproxy-gateway-linux-amd64-v1 --version`.
+Startup logs, the `/api/mcp` discovery response and MCP `initialize.serverInfo.version` use the same injected version.
+A plain `go build` without linker flags reports `dev`.
+
+The Release workflow uses these same scripts. Manually run it on the desired branch/ref with `tag_name` left blank
+to generate the tag automatically, or push a tag that exactly matches `bash scripts/version.sh`.
+An optional manual `tag_name` is checked against the computed version; old date-only or mismatched tags fail validation.
+New Release tags point to the exact commit used to build the assets. Ordinary branch pushes run validation CI only.
+
 ## ⚙️ Configuration (`config.yaml`)
 
 The gateway is configured via a single YAML file. Refer to the default configuration file for complete details:

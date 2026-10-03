@@ -16,6 +16,7 @@ import (
 func registerMCPRoutes(mux *http.ServeMux) {
 	publishMCPPolicy(cfg)
 	options := gatewaymcp.Options{
+		Version: version,
 		Backend: mux,
 		Policy: func() gatewaymcp.Policy {
 			policy := currentMCPPolicy()
@@ -97,6 +98,7 @@ func registerMCPRoutes(mux *http.ServeMux) {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
+			"version": version,
 			"enabled": currentMCPPolicy().Config.Enabled, "allow_writes": currentMCPPolicy().Config.AllowWrites,
 			"endpoint": "/mcp", "transport": "streamable-http", "stateless": true,
 			"tools": gatewaymcp.ToolNames, "resources": 7, "prompts": 2,

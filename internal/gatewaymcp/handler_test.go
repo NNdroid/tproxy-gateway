@@ -183,8 +183,12 @@ func data(t *testing.T, result *mcp.CallToolResult) map[string]any {
 func TestOfficialClientAndSharedPort(t *testing.T) {
 	for _, version := range []string{"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"} {
 		t.Run(version, func(t *testing.T) {
-			f := newFixture(t, false)
+			const buildVersion = "v1.0.20261003.12-123abcd"
+			f := newFixture(t, false, func(options *Options) { options.Version = buildVersion })
 			session := connect(t, f, version)
+			if got := session.InitializeResult().ServerInfo.Version; got != buildVersion {
+				t.Fatalf("MCP server version = %q, want %q", got, buildVersion)
+			}
 			tools, err := session.ListTools(context.Background(), nil)
 			if err != nil {
 				t.Fatal(err)

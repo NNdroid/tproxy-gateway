@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,7 +21,12 @@ var (
 
 func main() {
 	configPath := flag.String("c", "config.yaml", "Specify YAML configuration file path")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	InitLogger("info")
 
@@ -31,6 +37,7 @@ func main() {
 	}
 
 	InitLogger(cfg.Log.Level)
+	zap.S().Infof("Starting tproxy-gateway %s", version)
 	zap.S().Infof("Loading configuration from %s...", *configPath)
 
 	defaultResolver, err = NewDefaultResolver(cfg.Routing.DefaultDNS)

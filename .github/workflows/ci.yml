@@ -15,6 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
@@ -28,8 +29,14 @@ jobs:
         run: go vet ./...
       - name: Dashboard tests
         run: node --test scripts/webui.test.cjs scripts/mcp-ui.test.cjs
+      - name: Version and build script regression tests
+        run: bash scripts/version.test.sh
       - name: Linux architecture builds
         run: |
+          VERSION="$(bash scripts/version.sh)"
           for arch in amd64 arm64 mipsle; do
-            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -o "$RUNNER_TEMP/tproxy-gateway-$arch" .
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags="-s -w -X main.version=$VERSION" -o "$RUNNER_TEMP/tproxy-gateway-$arch" .
           done
+          test "$("$RUNNER_TEMP/tproxy-gateway-amd64" --version)" = "$VERSION"
+          test "$("$RUNNER_TEMP/tproxy-gateway-amd64" -version)" = "$VERSION"

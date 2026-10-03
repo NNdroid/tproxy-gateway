@@ -21,6 +21,7 @@ const MaxRequestBytes = 1 << 20
 const maxResponseBytes = 4 << 20
 
 type Options struct {
+	Version        string
 	Policy         func() Policy
 	Backend        http.Handler
 	Secret         func() string
